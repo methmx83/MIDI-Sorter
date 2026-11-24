@@ -1,0 +1,72 @@
+titel: "Annihilation_Orchestral"
+status: "final"
+
+hauptstil: "orchestral"
+substil:
+  - "cinematic"
+  - "dark"
+  - "trailer"
+
+tonart:
+  grundton: "E"
+  modus: "minor"
+  sicherheit: "sicher"
+
+taktart: "4/4"
+tempo_bpm: 120
+
+stimmung:
+  - "düster"
+  - "dramatisch"
+  - "traurig"
+
+meine_bewertung: 9
+warum_ich_das_projekt_mag:
+  - "Schöne Streicher Melodie"
+  - "Abwechslungsreich"
+
+
+wichtige_spuren:
+  hauptmelodie:
+    - "Pianos"
+  gegenmelodie:
+    - "Tina Solo Cello"
+  harmonie:
+    - "String Ensemble Sus"
+    - "Violin Harmonics"
+  bass:
+    - "Bass Arp"
+  rhythmisches_fundament:
+    - "Djuns"
+    - "Dhols"
+    - "Timpani"
+
+abschnitte:
+  - name: "Intro"
+    von_takt: 1
+    bis_takt: 12
+  - name: "Aufbau"
+    von_takt: 13
+    bis_takt: 40
+  - name: "Bridge"
+    von_takt: 41
+    bis_takt: 76
+  - name: "Finale"
+    von_takt: 77
+    bis_takt: 120
+
+besondere_merkmale:
+  - "Streicher-Ostinato als rhythmischer Motor"
+  - "Blechbläser erst im späteren Verlauf"
+  - "Melodie wird mehrfach orchestriert"
+
+library_abkürzungen:
+  CS: "Cinematic Studio"
+  Ark: "Metropolis Ark"
+  BL: "Benutzerdefinierte Abkürzung erklären"
+  Spic: "Spiccato"
+  Stac: "Staccato"
+  Leg: "Legato"
+  Marc: "Marcato"
+  Sus: "Sustain"
+
