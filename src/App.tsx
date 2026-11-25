@@ -95,6 +95,7 @@ export default function App() {
   useEffect(() => {
     const player = playerRef.current!;
     const unsub = player.subscribe(setPlayback);
+    void player.initWebMidi();
     return () => {
       unsub();
       player.stop();
@@ -983,6 +984,13 @@ export default function App() {
               onPlayPause={() => playerRef.current?.toggle()}
               onSeek={(sec) => playerRef.current?.seek(sec)}
               onVolumeChange={(vol) => playerRef.current?.setVolume(vol)}
+              onTempoChange={(bpm) => playerRef.current?.setPlaybackBpm(bpm)}
+              onSelectMidiOutput={(id) => playerRef.current?.setMidiOutput(id)}
+              onRefreshMidiOutputs={() => playerRef.current?.refreshMidiOutputs()}
+              onChangeMidiChannelRouting={(routing) =>
+                playerRef.current?.setMidiChannelRouting(routing)
+              }
+              onMidiPanic={() => playerRef.current?.panicMidi()}
               onTriage={(status) => {
                 if (selectedEntry) {
                   setTriageStatus(selectedEntry.id, status, status !== 'pending');

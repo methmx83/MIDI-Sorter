@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Bookmark,
+  Cable,
   Check,
   ChevronDown,
   ChevronUp,
@@ -9,16 +10,21 @@ import {
   Copyright,
   Download,
   FileText,
+  Gauge,
   Maximize2,
+  Minus,
   Music2,
   Pause,
   Pencil,
   Play,
+  Plus,
+  RefreshCw,
   RotateCcw,
   Save,
   Scissors,
   Trash2,
   Volume2,
+  VolumeX,
   Wand2,
   X,
   XCircle,
@@ -28,7 +34,7 @@ import {
 import type { MidiFileEntry, MidiNote, TriageStatus } from '../types/midi';
 import type { DuplicateMatchInfo } from '../utils/midiDuplicates';
 import { formatBytes, formatDuration, midiPitchToName } from '../utils/midiParser';
-import type { MidiPlaybackState } from '../utils/midiPlayer';
+import type { MidiChannelRouting, MidiPlaybackState } from '../utils/midiPlayer';
 import {
   computeBarEndTick,
   computeBarStartTick,
@@ -44,6 +50,11 @@ interface MidiPianoRollProps {
   onPlayPause: () => void;
   onSeek: (sec: number) => void;
   onVolumeChange: (vol: number) => void;
+  onTempoChange: (bpm: number | null) => void;
+  onSelectMidiOutput: (outputId: string | null) => void;
+  onRefreshMidiOutputs: () => void;
+  onChangeMidiChannelRouting: (routing: MidiChannelRouting) => void;
+  onMidiPanic: () => void;
   onTriage: (status: TriageStatus) => void;
   canWriteToDisk: boolean;
   onImmediateMoveToSorted?: (entry: MidiFileEntry) => void;
@@ -85,6 +96,11 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   onPlayPause,
   onSeek,
   onVolumeChange,
+  onTempoChange,
+  onSelectMidiOutput,
+  onRefreshMidiOutputs,
+  onChangeMidiChannelRouting,
+  onMidiPanic,
   onTriage,
   canWriteToDisk,
   onImmediateMoveToSorted,
@@ -113,6 +129,8 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   const [showMetadata, setShowMetadata] = useState<boolean>(true);
   const [metaExpanded, setMetaExpanded] = useState<boolean>(false);
   const [volume, setVolume] = useState<number>(0.75);
+  const [isEditingBpm, setIsEditingBpm] = useState<boolean>(false);
+  const [bpmDraft, setBpmDraft] = useState<string>('');
   const [hoveredNote, setHoveredNote] = useState<{
     note: MidiNote;
     x: number;
@@ -175,6 +193,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
     setIsRenaming(false);
     setRenameError(null);
     setMetaExpanded(false);
+    setIsEditingBpm(false);
   }, [entry?.id]);
 
   const runSmartTrimSilence = async () => {
@@ -1004,7 +1023,17 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
               <span aria-hidden="true">·</span>
               <span>{formatDuration(parsed.totalDurationSec)}</span>
               <span aria-hidden="true">·</span>
-              <span>{parsed.primaryBpm} BPM</span>
+              <span
+                className={playback.isTempoOverridden ? 'text-[#7cc4f0]' : ''}
+                title={
+                  playback.isTempoOverridden
+                    ? `MIDI-Header-Tempo: ${parsed.primaryBpm} BPM · Wiedergabe: ${playback.playbackBpm} BPM`
+                    : 'Aus MIDI-Header extrahiertes Tempo'
+                }
+              >
+                {parsed.primaryBpm} BPM
+                {playback.isTempoOverridden ? ` → ${playback.playbackBpm} BPM` : ''}
+              </span>
               <span aria-hidden="true">·</span>
               <span>{parsed.primaryTimeSignature}</span>
               <span aria-hidden="true">·</span>
@@ -1905,8 +1934,117 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
           </button>
 
           <div className="text-xs font-mono tabular-nums text-[#9ba4b0] min-w-[84px]">
-            {formatDuration(playback.currentSec)} / {formatDuration(playback.totalSec)}
+            {formatDuration(
+              playback.tempoRate > 0 ? playback.currentSec / playback.tempoRate : playback.currentSec
+            )}{' '}
+            /{' '}
+            {formatDuration(
+              playback.tempoRate > 0 ? playback.totalSec / playback.tempoRate : playback.totalSec
+            )}
           </div>
+
+          {/* Extracted Header BPM & Manual Playback Tempo Control */}
+          {(() => {
+            const formatBpm = (val: number) =>
+              Number.isInteger(val) ? String(val) : val.toFixed(1);
+            const displayBpm = parsed ? playback.playbackBpm : 120;
+            const headerBpm = parsed?.primaryBpm ?? playback.baseBpm;
+            const canAdjustTempo = Boolean(parsed && parsed.notes.length > 0);
+
+            const commitBpmDraft = () => {
+              const normalized = bpmDraft.replace(',', '.').trim();
+              const num = Number(normalized);
+              setIsEditingBpm(false);
+              if (Number.isFinite(num) && num > 0) {
+                onTempoChange(num);
+              }
+            };
+
+            return (
+              <div
+                className={`flex items-center rounded border transition-colors ${
+                  playback.isTempoOverridden
+                    ? 'bg-[#1d2b38] border-[#4ea1d3]/65'
+                    : 'bg-[#22272f] border-[#313844]'
+                }`}
+                title={`MIDI-Header: ${formatBpm(headerBpm)} BPM · Klick zum Bearbeiten (±5 BPM, Shift+Klick für ±1 BPM)`}
+              >
+                <span className="pl-2 pr-1 text-[#7ea8c9] flex items-center" aria-hidden="true">
+                  <Gauge className="w-3.5 h-3.5" />
+                </span>
+                <button
+                  type="button"
+                  disabled={!canAdjustTempo || displayBpm <= 20}
+                  onClick={(e) =>
+                    onTempoChange(Math.max(20, displayBpm - (e.shiftKey ? 1 : 5)))
+                  }
+                  className="p-1 text-[#9aa3b0] hover:text-white disabled:opacity-35 transition-colors"
+                  title="Tempo verringern (−5 BPM, Shift: −1 BPM)"
+                  aria-label="Tempo verringern"
+                >
+                  <Minus className="w-3 h-3" />
+                </button>
+                <div className="flex items-center px-0.5">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    disabled={!canAdjustTempo}
+                    value={isEditingBpm ? bpmDraft : formatBpm(displayBpm)}
+                    onFocus={(e) => {
+                      setIsEditingBpm(true);
+                      setBpmDraft(formatBpm(displayBpm));
+                      e.currentTarget.select();
+                    }}
+                    onChange={(e) => setBpmDraft(e.target.value)}
+                    onBlur={commitBpmDraft}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        commitBpmDraft();
+                        e.currentTarget.blur();
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        setIsEditingBpm(false);
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    className={`w-11 bg-transparent text-center text-xs font-mono tabular-nums focus:outline-none disabled:opacity-45 ${
+                      playback.isTempoOverridden
+                        ? 'text-[#7cc4f0] font-semibold'
+                        : 'text-[#e2e7ee]'
+                    }`}
+                    aria-label="Wiedergabe-Tempo in BPM"
+                  />
+                  <span className="pr-1.5 text-[10px] font-mono text-[#7f8895] select-none">
+                    BPM
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={!canAdjustTempo || displayBpm >= 300}
+                  onClick={(e) =>
+                    onTempoChange(Math.min(300, displayBpm + (e.shiftKey ? 1 : 5)))
+                  }
+                  className="p-1 text-[#9aa3b0] hover:text-white disabled:opacity-35 transition-colors"
+                  title="Tempo erhöhen (+5 BPM, Shift: +1 BPM)"
+                  aria-label="Tempo erhöhen"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+                {playback.isTempoOverridden && (
+                  <button
+                    type="button"
+                    onClick={() => onTempoChange(null)}
+                    className="p-1.5 text-[#7cc4f0] hover:text-white border-l border-[#34495e] transition-colors"
+                    title={`Auf MIDI-Header-Tempo zurücksetzen (${formatBpm(headerBpm)} BPM)`}
+                    aria-label="Tempo zurücksetzen"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            );
+          })()}
 
           <label className="hidden sm:inline-flex items-center gap-1.5 text-xs text-[#9ba4b0] cursor-pointer select-none">
             <input
@@ -1918,22 +2056,120 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
             Auto-Play
           </label>
 
-          <div className="hidden md:flex items-center gap-1.5 ml-1">
-            <Volume2 className="w-3.5 h-3.5 text-[#7d8694]" />
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={volume}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                setVolume(v);
-                onVolumeChange(v);
-              }}
-              className="w-16 accent-[#4ea1d3] h-1 cursor-pointer"
-              aria-label="Lautstärke"
-            />
+          {!playback.selectedMidiOutputId && (
+            <div className="hidden md:flex items-center gap-1.5 ml-1">
+              <Volume2 className="w-3.5 h-3.5 text-[#7d8694]" />
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={volume}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setVolume(v);
+                  onVolumeChange(v);
+                }}
+                className="w-16 accent-[#4ea1d3] h-1 cursor-pointer"
+                aria-label="Lautstärke"
+              />
+            </div>
+          )}
+
+          {/* Web MIDI Output Selector (e.g. loopMIDI -> Kontakt 8 Standalone) */}
+          <div className="flex items-center gap-1.5">
+            <div
+              className={`flex items-center rounded border transition-colors ${
+                playback.selectedMidiOutputId
+                  ? 'bg-[#1d2b38] border-[#4ea1d3]/65'
+                  : 'bg-[#22272f] border-[#313844]'
+              }`}
+              title={
+                playback.midiError ||
+                'MIDI-Ausgang wählen (z. B. loopMIDI Port für Native Instruments Kontakt 8 Standalone)'
+              }
+            >
+              <span
+                className={`pl-2 pr-1 flex items-center ${
+                  playback.selectedMidiOutputId ? 'text-[#5eb1e6]' : 'text-[#7d8694]'
+                }`}
+                aria-hidden="true"
+              >
+                <Cable className="w-3.5 h-3.5" />
+              </span>
+              <select
+                value={playback.selectedMidiOutputId ?? ''}
+                onChange={(e) => onSelectMidiOutput(e.target.value || null)}
+                className={`bg-transparent py-1 pr-2 text-xs focus:outline-none max-w-[165px] cursor-pointer ${
+                  playback.selectedMidiOutputId
+                    ? 'text-[#d8ecfa] font-medium'
+                    : 'text-[#cfd5de]'
+                }`}
+                aria-label="MIDI-Ausgang"
+              >
+                <option value="" className="bg-[#1c2026] text-[#cfd5de]">
+                  Browser-Synth
+                </option>
+                {playback.midiOutputs.map((out) => (
+                  <option key={out.id} value={out.id} className="bg-[#1c2026] text-[#eef1f5]">
+                    {out.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={onRefreshMidiOutputs}
+                className="p-1.5 text-[#8b94a1] hover:text-white border-l border-[#313844] transition-colors"
+                title={
+                  playback.midiError
+                    ? `MIDI-Geräte neu suchen (${playback.midiError})`
+                    : 'MIDI-Ausgänge neu scannen'
+                }
+                aria-label="MIDI-Ausgänge aktualisieren"
+              >
+                <RefreshCw className="w-3 h-3" />
+              </button>
+            </div>
+
+            {playback.selectedMidiOutputId && (
+              <>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onChangeMidiChannelRouting(
+                      playback.midiChannelRouting === 'ch1' ? 'original' : 'ch1'
+                    )
+                  }
+                  className="px-2 py-1 rounded text-[11px] font-mono font-medium bg-[#22272f] hover:bg-[#2c333d] border border-[#313844] text-[#b8cde0] transition-colors whitespace-nowrap"
+                  title={
+                    playback.midiChannelRouting === 'ch1'
+                      ? 'Aktuell: Alle Noten auf MIDI-Kanal 1 (ideal für einzelnes Kontakt-Instrument). Klicken für Original-Kanäle 1–16.'
+                      : 'Aktuell: Original-MIDI-Kanäle 1–16 (für Kontakt-Multis oder Omni). Klicken für Kanal 1.'
+                  }
+                >
+                  {playback.midiChannelRouting === 'ch1' ? 'Ch 1' : 'Ch 1–16'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={onMidiPanic}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium bg-[#292226] hover:bg-rose-900/50 border border-[#443139] hover:border-rose-600/60 text-rose-300 transition-colors whitespace-nowrap"
+                  title="MIDI Panic: Alle hängenden Noten in Kontakt sofort stoppen (All Notes Off)"
+                >
+                  <VolumeX className="w-3 h-3" />
+                  Panic
+                </button>
+              </>
+            )}
+
+            {playback.midiError && (
+              <span
+                className="inline-flex items-center text-amber-400"
+                title={playback.midiError}
+              >
+                <AlertTriangle className="w-3.5 h-3.5" />
+              </span>
+            )}
           </div>
         </div>
 

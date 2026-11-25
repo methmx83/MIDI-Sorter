@@ -1,13 +1,76 @@
 import type { MidiNote, ParsedMidi } from '../types/midi';
 
+export interface WebMidiOutputDevice {
+  id: string;
+  name: string;
+  manufacturer: string;
+  state: string;
+}
+
+export type MidiChannelRouting = 'ch1' | 'original';
+
+export type WebMidiStatus = 'uninitialized' | 'ready' | 'unsupported' | 'denied';
+
 export interface MidiPlaybackState {
   isPlaying: boolean;
   currentSec: number;
   totalSec: number;
   activePitches: Set<number>;
+  baseBpm: number;
+  playbackBpm: number;
+  tempoRate: number;
+  isTempoOverridden: boolean;
+  midiStatus: WebMidiStatus;
+  midiError: string | null;
+  midiOutputs: WebMidiOutputDevice[];
+  selectedMidiOutputId: string | null;
+  midiChannelRouting: MidiChannelRouting;
 }
 
 type StateListener = (state: MidiPlaybackState) => void;
+
+interface PendingMidiNoteOff {
+  offMidiSec: number;
+  channel: number;
+  pitch: number;
+}
+
+const LS_MIDI_OUTPUT_NAME_KEY = 'midi_sorter_midi_output_name_v1';
+const LS_MIDI_CHANNEL_ROUTING_KEY = 'midi_sorter_midi_channel_v1';
+
+function loadSavedOutputName(): string | null {
+  try {
+    return window.localStorage.getItem(LS_MIDI_OUTPUT_NAME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveOutputName(name: string | null): void {
+  try {
+    if (name) window.localStorage.setItem(LS_MIDI_OUTPUT_NAME_KEY, name);
+    else window.localStorage.removeItem(LS_MIDI_OUTPUT_NAME_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function loadSavedChannelRouting(): MidiChannelRouting {
+  try {
+    const val = window.localStorage.getItem(LS_MIDI_CHANNEL_ROUTING_KEY);
+    return val === 'original' ? 'original' : 'ch1';
+  } catch {
+    return 'ch1';
+  }
+}
+
+function saveChannelRouting(routing: MidiChannelRouting): void {
+  try {
+    window.localStorage.setItem(LS_MIDI_CHANNEL_ROUTING_KEY, routing);
+  } catch {
+    // ignore storage errors
+  }
+}
 
 function midiToFrequency(pitch: number): number {
   return 440 * Math.pow(2, (pitch - 69) / 12);
@@ -24,12 +87,26 @@ export class WebMidiPlayer {
   private schedulerTimer: number | null = null;
   private rafId: number | null = null;
   private volume = 0.7;
+  private overrideBpm: number | null = null;
   private activeNodes: Set<AudioNode> = new Set();
   private listeners: Set<StateListener> = new Set();
 
+  // Web MIDI Output state
+  private midiAccess: MIDIAccess | null = null;
+  private midiStatus: WebMidiStatus = 'uninitialized';
+  private midiError: string | null = null;
+  private midiOutputs: WebMidiOutputDevice[] = [];
+  private selectedMidiOutputId: string | null = null;
+  private preferredMidiOutputName: string | null = loadSavedOutputName();
+  private midiChannelRouting: MidiChannelRouting = loadSavedChannelRouting();
+  private pendingMidiNoteOffs: PendingMidiNoteOff[] = [];
+  private soundingMidiNotes: Map<string, { channel: number; pitch: number }> = new Map();
+
   private ensureAudioContext(): AudioContext {
     if (!this.ctx) {
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AudioCtx();
       this.masterGain = this.ctx.createGain();
       this.masterGain.gain.value = this.volume * 0.45;
@@ -39,6 +116,122 @@ export class WebMidiPlayer {
       void this.ctx.resume();
     }
     return this.ctx;
+  }
+
+  async initWebMidi(): Promise<void> {
+    if (typeof navigator === 'undefined' || typeof navigator.requestMIDIAccess !== 'function') {
+      this.midiStatus = 'unsupported';
+      this.midiError =
+        'Web MIDI wird von diesem Browser nicht unterstützt (bitte Chrome oder Edge nutzen).';
+      this.emit();
+      return;
+    }
+
+    try {
+      const access = await navigator.requestMIDIAccess({ sysex: false });
+      this.midiAccess = access;
+      this.midiStatus = 'ready';
+      this.midiError = null;
+      access.onstatechange = () => {
+        this.refreshMidiOutputs();
+      };
+      this.refreshMidiOutputs();
+    } catch (err) {
+      this.midiStatus = 'denied';
+      if (err instanceof DOMException && err.name === 'SecurityError') {
+        this.midiError =
+          'Web MIDI wurde hier blockiert (z. B. im Vorschau-Frame). Öffne die App direkt in Chrome/Edge auf localhost:3000.';
+      } else {
+        this.midiError =
+          err instanceof Error ? err.message : 'Zugriff auf MIDI-Geräte fehlgeschlagen.';
+      }
+      this.emit();
+    }
+  }
+
+  refreshMidiOutputs(): void {
+    if (!this.midiAccess) {
+      void this.initWebMidi();
+      return;
+    }
+
+    const outputs: WebMidiOutputDevice[] = [];
+    for (const out of this.midiAccess.outputs.values()) {
+      outputs.push({
+        id: out.id,
+        name: out.name || `MIDI-Ausgang (${out.id})`,
+        manufacturer: out.manufacturer || '',
+        state: out.state,
+      });
+    }
+    outputs.sort((a, b) => a.name.localeCompare(b.name, 'de', { sensitivity: 'base' }));
+    this.midiOutputs = outputs;
+
+    if (this.selectedMidiOutputId && outputs.some((o) => o.id === this.selectedMidiOutputId)) {
+      // Keep active port
+    } else if (this.preferredMidiOutputName) {
+      const matched = outputs.find((o) => o.name === this.preferredMidiOutputName);
+      this.selectedMidiOutputId = matched ? matched.id : null;
+    } else {
+      this.selectedMidiOutputId = null;
+    }
+
+    this.emit();
+  }
+
+  setMidiOutput(outputId: string | null): void {
+    this.sendAllNotesOff();
+    const nextId = outputId && outputId.trim() ? outputId : null;
+    this.selectedMidiOutputId = nextId;
+
+    if (nextId) {
+      const found = this.midiOutputs.find((o) => o.id === nextId);
+      this.preferredMidiOutputName = found ? found.name : null;
+      saveOutputName(this.preferredMidiOutputName);
+    } else {
+      this.preferredMidiOutputName = null;
+      saveOutputName(null);
+    }
+
+    this.emit();
+  }
+
+  setMidiChannelRouting(routing: MidiChannelRouting): void {
+    if (this.midiChannelRouting === routing) return;
+    this.sendAllNotesOff();
+    this.midiChannelRouting = routing;
+    saveChannelRouting(routing);
+    this.emit();
+  }
+
+  panicMidi(): void {
+    this.sendAllNotesOff();
+    this.emit();
+  }
+
+  private getActiveMidiOutput(): MIDIOutput | null {
+    if (!this.midiAccess || !this.selectedMidiOutputId) return null;
+    return this.midiAccess.outputs.get(this.selectedMidiOutputId) ?? null;
+  }
+
+  private sendAllNotesOff(): void {
+    const out = this.getActiveMidiOutput();
+    if (out) {
+      try {
+        for (const item of this.soundingMidiNotes.values()) {
+          out.send([0x80 | (item.channel & 0x0f), item.pitch & 0x7f, 0]);
+        }
+        for (let ch = 0; ch < 16; ch++) {
+          out.send([0xb0 | ch, 64, 0]); // Sustain pedal off
+          out.send([0xb0 | ch, 123, 0]); // All Notes Off
+          out.send([0xb0 | ch, 120, 0]); // All Sound Off
+        }
+      } catch {
+        // Output may have been disconnected
+      }
+    }
+    this.pendingMidiNoteOffs = [];
+    this.soundingMidiNotes.clear();
   }
 
   subscribe(listener: StateListener): () => void {
@@ -56,6 +249,17 @@ export class WebMidiPlayer {
     }
   }
 
+  private getBaseBpm(): number {
+    const bpm = this.midi?.primaryBpm;
+    return bpm && Number.isFinite(bpm) && bpm > 0 ? bpm : 120;
+  }
+
+  private getTempoRate(): number {
+    if (this.overrideBpm === null) return 1;
+    const base = this.getBaseBpm();
+    return Math.max(0.15, Math.min(4, this.overrideBpm / base));
+  }
+
   getState(): MidiPlaybackState {
     const totalSec = this.midi?.totalDurationSec ?? 0;
     const currentSec = this.getCurrentSec();
@@ -71,11 +275,24 @@ export class WebMidiPlayer {
       }
     }
 
+    const baseBpm = this.getBaseBpm();
+    const playbackBpm = this.overrideBpm ?? baseBpm;
+    const tempoRate = this.getTempoRate();
+
     return {
       isPlaying: this.isPlaying,
       currentSec,
       totalSec,
       activePitches,
+      baseBpm,
+      playbackBpm,
+      tempoRate,
+      isTempoOverridden: this.overrideBpm !== null,
+      midiStatus: this.midiStatus,
+      midiError: this.midiError,
+      midiOutputs: this.midiOutputs,
+      selectedMidiOutputId: this.selectedMidiOutputId,
+      midiChannelRouting: this.midiChannelRouting,
     };
   }
 
@@ -84,8 +301,9 @@ export class WebMidiPlayer {
     if (!this.isPlaying || !this.ctx) {
       return Math.min(this.offsetSec, this.midi.totalDurationSec);
     }
-    const elapsed = this.ctx.currentTime - this.startContextTime;
-    return Math.min(this.offsetSec + Math.max(0, elapsed), this.midi.totalDurationSec);
+    const elapsedReal = Math.max(0, this.ctx.currentTime - this.startContextTime);
+    const elapsedMidi = elapsedReal * this.getTempoRate();
+    return Math.min(this.offsetSec + elapsedMidi, this.midi.totalDurationSec);
   }
 
   setVolume(val: number): void {
@@ -95,9 +313,35 @@ export class WebMidiPlayer {
     }
   }
 
+  setPlaybackBpm(bpm: number | null): void {
+    const currentPos = this.getCurrentSec();
+    const base = this.getBaseBpm();
+
+    if (bpm === null || !Number.isFinite(bpm)) {
+      this.overrideBpm = null;
+    } else {
+      const clamped = Math.max(20, Math.min(300, Math.round(bpm * 10) / 10));
+      this.overrideBpm = Math.abs(clamped - base) < 0.05 ? null : clamped;
+    }
+
+    if (this.isPlaying && this.midi && this.ctx) {
+      this.offsetSec = currentPos;
+      this.startContextTime = this.ctx.currentTime;
+      this.stopScheduledNodes();
+      this.nextNoteIdx = this.midi.notes.findIndex((n) => n.startSec >= currentPos - 0.01);
+      if (this.nextNoteIdx === -1) {
+        this.nextNoteIdx = this.midi.notes.length;
+      }
+      this.scheduleLookahead();
+    }
+
+    this.emit();
+  }
+
   load(midi: ParsedMidi | null, autoPlay = false): void {
     this.stop();
     this.midi = midi;
+    this.overrideBpm = null;
     this.offsetSec = 0;
     this.nextNoteIdx = 0;
     this.emit();
@@ -207,29 +451,73 @@ export class WebMidiPlayer {
       }
     }
     this.activeNodes.clear();
+    this.sendAllNotesOff();
   }
 
   private scheduleLookahead(): void {
     if (!this.isPlaying || !this.midi || !this.ctx || !this.masterGain) return;
 
-    const lookaheadSec = 0.22;
+    const rate = this.getTempoRate();
+    const lookaheadMidiSec = 0.24 * rate;
     const currentSongSec = this.getCurrentSec();
-    const horizonSec = currentSongSec + lookaheadSec;
+    const horizonSec = currentSongSec + lookaheadMidiSec;
 
+    const midiOut = this.getActiveMidiOutput();
+    const nowCtx = this.ctx.currentTime;
+    const nowPerf = performance.now();
+
+    // 1. Schedule pending external MIDI Note-Offs inside lookahead horizon
+    if (midiOut && this.pendingMidiNoteOffs.length > 0) {
+      const remaining: PendingMidiNoteOff[] = [];
+      for (const item of this.pendingMidiNoteOffs) {
+        if (item.offMidiSec <= horizonSec) {
+          const deltaReal = Math.max(0, (item.offMidiSec - currentSongSec) / rate);
+          const offAt = nowPerf + deltaReal * 1000;
+          try {
+            midiOut.send([0x80 | item.channel, item.pitch, 0], offAt);
+          } catch {
+            // ignore disconnected output
+          }
+          this.soundingMidiNotes.delete(`${item.channel}:${item.pitch}`);
+        } else {
+          remaining.push(item);
+        }
+      }
+      this.pendingMidiNoteOffs = remaining;
+    }
+
+    // 2. Schedule upcoming Note-Ons
     while (this.nextNoteIdx < this.midi.notes.length) {
       const note = this.midi.notes[this.nextNoteIdx];
       if (note.startSec > horizonSec) break;
       this.nextNoteIdx++;
 
-      const deltaFromNow = note.startSec - currentSongSec;
-      if (deltaFromNow < -0.05) continue;
+      const deltaMidi = note.startSec - currentSongSec;
+      if (deltaMidi < -0.05 * rate) continue;
 
-      const scheduleAt = this.ctx.currentTime + Math.max(0, deltaFromNow);
-      this.triggerNote(note, scheduleAt);
+      const deltaReal = Math.max(0, deltaMidi / rate);
+
+      if (midiOut) {
+        const ch = this.midiChannelRouting === 'ch1' ? 0 : note.channel & 0x0f;
+        const pitch = Math.max(0, Math.min(127, note.pitch));
+        const vel = Math.max(1, Math.min(127, note.velocity));
+        const scheduleMidiAt = nowPerf + deltaReal * 1000;
+        try {
+          midiOut.send([0x90 | ch, pitch, vel], scheduleMidiAt);
+        } catch {
+          // ignore disconnected output
+        }
+        const offMidiSec = note.startSec + Math.max(0.03, note.durationSec);
+        this.soundingMidiNotes.set(`${ch}:${pitch}`, { channel: ch, pitch });
+        this.pendingMidiNoteOffs.push({ offMidiSec, channel: ch, pitch });
+      } else {
+        const scheduleAt = nowCtx + deltaReal;
+        this.triggerNote(note, scheduleAt, rate);
+      }
     }
   }
 
-  private triggerNote(note: MidiNote, when: number): void {
+  private triggerNote(note: MidiNote, when: number, rate: number): void {
     if (!this.ctx || !this.masterGain) return;
     const velGain = Math.max(0.08, (note.velocity / 127) * 0.28);
 
@@ -254,7 +542,7 @@ export class WebMidiPlayer {
     filter.type = 'lowpass';
     filter.frequency.setValueAtTime(Math.min(5500, freq * 5.5), when);
 
-    const dur = Math.min(6.0, Math.max(0.06, note.durationSec));
+    const dur = Math.min(6.0, Math.max(0.05, note.durationSec / rate));
     const attack = 0.008;
     const release = Math.min(0.18, dur * 0.35 + 0.04);
 
