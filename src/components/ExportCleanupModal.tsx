@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CheckCircle2, Copy, Download, FolderInput, Trash2, X } from 'lucide-react';
+import { CheckCircle2, Copy, Download, FolderInput, ShieldCheck, Trash2, X } from 'lucide-react';
 import type { MidiFileEntry } from '../types/midi';
 import { buildCleanupScript } from '../utils/fileSystem';
 
@@ -9,6 +9,8 @@ interface ExportCleanupModalProps {
   discardedEntries: MidiFileEntry[];
   folderName: string;
   canWriteToDisk: boolean;
+  protectOriginals: boolean;
+  onUnlockProtection: () => void;
   onExecuteDiskMove: () => Promise<void>;
   onExecuteDiskDelete: () => Promise<void>;
 }
@@ -19,6 +21,8 @@ export const ExportCleanupModal: React.FC<ExportCleanupModalProps> = ({
   discardedEntries,
   folderName,
   canWriteToDisk,
+  protectOriginals,
+  onUnlockProtection,
   onExecuteDiskMove,
   onExecuteDiskDelete,
 }) => {
@@ -136,42 +140,70 @@ export const ExportCleanupModal: React.FC<ExportCleanupModalProps> = ({
 
           {canWriteToDisk ? (
             <div className="space-y-3 pt-1 border-t border-[#2d333d]">
-              <p className="text-xs text-[#9ca5b2]">
-                Direkte Ordner-Berechtigung aktiv — du kannst die Dateien direkt auf deiner
-                Festplatte verschieben oder löschen:
-              </p>
-              <div className="flex flex-wrap gap-2.5">
-                <button
-                  type="button"
-                  disabled={busy || discardedEntries.length === 0}
-                  onClick={handleDiskMove}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded bg-[#3675a3] hover:bg-[#4187ba] disabled:opacity-40 text-xs font-medium text-white transition-colors"
-                >
-                  <FolderInput className="w-4 h-4" />
-                  In „_Aussortiert“ verschieben (Sicher)
-                </button>
-              </div>
+              {protectOriginals ? (
+                <div className="p-3.5 rounded bg-[#16232e] border border-[#3a6282]/60 space-y-2.5">
+                  <div className="flex items-start gap-2 text-xs text-[#c8e3f7]">
+                    <ShieldCheck className="w-4 h-4 text-[#5eb1e6] shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <div className="font-semibold text-white">
+                        Originalschutz ist aktiv
+                      </div>
+                      <p className="text-[#9bb7ce] leading-relaxed">
+                        Unbeabsichtigtes Verschieben oder Löschen von Originaldateien ist gesperrt.
+                        Du kannst ein sicheres Bereinigungs-Skript herunterladen oder den Originalschutz für diese Aktion gezielt aufheben.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={onUnlockProtection}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#2a3846] hover:bg-[#354759] border border-[#4ea1d3]/60 text-xs font-medium text-[#dcebf7] transition-colors"
+                    >
+                      Originalschutz aufheben
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <p className="text-xs text-[#9ca5b2]">
+                    Direkte Ordner-Berechtigung aktiv — du kannst die Dateien direkt auf deiner
+                    Festplatte verschieben oder löschen:
+                  </p>
+                  <div className="flex flex-wrap gap-2.5">
+                    <button
+                      type="button"
+                      disabled={busy || discardedEntries.length === 0}
+                      onClick={handleDiskMove}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded bg-[#3675a3] hover:bg-[#4187ba] disabled:opacity-40 text-xs font-medium text-white transition-colors"
+                    >
+                      <FolderInput className="w-4 h-4" />
+                      In „_Aussortiert“ verschieben (Sicher)
+                    </button>
+                  </div>
 
-              <div className="pt-2 border-t border-[#282d36] space-y-2">
-                <label className="flex items-center gap-2 text-xs text-[#c5ccd6] cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={confirmDelete}
-                    onChange={(e) => setConfirmDelete(e.target.checked)}
-                    className="rounded border-[#434c59] bg-[#16191d] accent-rose-500"
-                  />
-                  Ja, markierte Dateien endgültig ohne Papierkorb löschen
-                </label>
-                <button
-                  type="button"
-                  disabled={busy || !confirmDelete || discardedEntries.length === 0}
-                  onClick={handleDiskDelete}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-xs font-medium text-white transition-colors"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  Endgültig löschen
-                </button>
-              </div>
+                  <div className="pt-2 border-t border-[#282d36] space-y-2">
+                    <label className="flex items-center gap-2 text-xs text-[#c5ccd6] cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={confirmDelete}
+                        onChange={(e) => setConfirmDelete(e.target.checked)}
+                        className="rounded border-[#434c59] bg-[#16191d] accent-rose-500"
+                      />
+                      Ja, markierte Dateien endgültig ohne Papierkorb löschen
+                    </label>
+                    <button
+                      type="button"
+                      disabled={busy || !confirmDelete || discardedEntries.length === 0}
+                      onClick={handleDiskDelete}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-xs font-medium text-white transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      Endgültig löschen
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           ) : (
             <div className="space-y-3 pt-1 border-t border-[#2d333d]">

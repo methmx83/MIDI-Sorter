@@ -3,6 +3,7 @@ import {
   DEFAULT_ABBREVIATIONS,
   type LibraryAbbreviation,
 } from './abbreviationProfile';
+import { getGmProgramName, getMidiCcLabel } from './midiConstants';
 import { analyzeMidiHarmony } from './musicTheory';
 
 export interface TrainingTxtSection {
@@ -446,6 +447,34 @@ export function buildTrainingTxtDraft(
     besondereMerkmale.push(`MIDI-Notiz: ${parsed.metadata.textEvents[0].text}`);
   }
 
+  if (parsed.performance.programChanges.length > 0) {
+    const uniqueProgs = Array.from(
+      new Set(parsed.performance.programChanges.map((p) => p.program))
+    ).slice(0, 4);
+    besondereMerkmale.push(
+      `GM-Programme: ${uniqueProgs.map((p) => getGmProgramName(p)).join(', ')}`
+    );
+  }
+
+  const exprParts: string[] = [];
+  if (parsed.performance.controlChanges.length > 0) {
+    const distinctCcs = Array.from(
+      new Set(parsed.performance.controlChanges.map((c) => c.controller))
+    ).slice(0, 4);
+    exprParts.push(
+      `CC (${distinctCcs.map((cc) => `${cc} ${getMidiCcLabel(cc)}`).join(', ')})`
+    );
+  }
+  if (parsed.performance.pitchBends.length > 0) {
+    exprParts.push(`Pitch Bend (${parsed.performance.pitchBends.length}×)`);
+  }
+  if (parsed.performance.aftertouch.length > 0) {
+    exprParts.push(`Aftertouch (${parsed.performance.aftertouch.length}×)`);
+  }
+  if (exprParts.length > 0) {
+    besondereMerkmale.push(`Expression / Controller: ${exprParts.join(' · ')}`);
+  }
+
   const warumMagIch: string[] = [];
   if (parsed.trackCount > 1) {
     warumMagIch.push(`Mehrspuriges Arrangement (${parsed.trackCount} Spuren)`);
@@ -578,6 +607,7 @@ export function buildDatasetJsonlRecord(
   return JSON.stringify({
     titel: draft.titel,
     midi_datei: entry.relativePath,
+    sha256: entry.sha256 ?? null,
     status: draft.status,
     hauptstil: draft.hauptstil,
     substil: draft.substil,
@@ -592,6 +622,19 @@ export function buildDatasetJsonlRecord(
     takte: parsed?.barCount ?? 0,
     dauer_sek: parsed ? Number(parsed.totalDurationSec.toFixed(2)) : 0,
     noten_anzahl: parsed?.notes.length ?? 0,
+    midi_kanaele: parsed?.performance.channels.map((c) => c.channel + 1) ?? [],
+    midi_events: parsed
+      ? {
+          cc_anzahl: parsed.performance.controlChanges.length,
+          pitch_bend_anzahl: parsed.performance.pitchBends.length,
+          aftertouch_anzahl: parsed.performance.aftertouch.length,
+          program_changes: parsed.performance.programChanges.map((pc) => ({
+            kanal: pc.channel + 1,
+            program: pc.program,
+            name: getGmProgramName(pc.program),
+          })),
+        }
+      : null,
     wichtige_spuren: draft.wichtigeSpuren,
     abschnitte: draft.abschnitte,
     akkordfolge: harmony?.progressionSummary ?? [],

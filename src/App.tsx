@@ -6,6 +6,8 @@ import {
   FolderOpen,
   MousePointerClick,
   Search,
+  ShieldAlert,
+  ShieldCheck,
   Trash2,
   Upload,
 } from 'lucide-react';
@@ -21,6 +23,7 @@ import {
   type LibraryAbbreviation,
 } from './utils/abbreviationProfile';
 import {
+  backupOriginalBeforeOverwriteOnDisk,
   canUseNativeDirectoryPicker,
   deleteEntryFromDisk,
   downloadMidiBuffer,
@@ -34,6 +37,8 @@ import {
   saveTrimmedCopyOnDisk,
   type LoadedFolderResult,
 } from './utils/fileSystem';
+import { computeSha256Hex } from './utils/hash';
+import { getGmProgramName } from './utils/midiConstants';
 import { detectMidiDuplicates } from './utils/midiDuplicates';
 import { createDemoMidiFiles, parseMidiBuffer } from './utils/midiParser';
 import { WebMidiPlayer, type MidiPlaybackState } from './utils/midiPlayer';
@@ -43,7 +48,26 @@ import {
   type SmartTrimSuggestion,
 } from './utils/midiTrimmer';
 
-type FilterMode = 'all' | 'issues' | 'duplicates' | 'pending' | 'keep' | 'discard';
+type FilterMode =
+  | 'all'
+  | 'issues'
+  | 'exact_duplicates'
+  | 'variants'
+  | 'pending'
+  | 'keep'
+  | 'discard';
+
+const PROTECT_ORIGINALS_STORAGE_KEY = 'midi_sorter_protect_originals_v1';
+
+function loadProtectOriginalsPref(): boolean {
+  try {
+    const raw = window.localStorage.getItem(PROTECT_ORIGINALS_STORAGE_KEY);
+    if (raw === 'false') return false;
+  } catch {
+    // Ignore storage errors
+  }
+  return true;
+}
 
 export default function App() {
   const [entries, setEntries] = useState<MidiFileEntry[]>([]);
@@ -72,11 +96,23 @@ export default function App() {
   const [abbreviations, setAbbreviations] = useState<LibraryAbbreviation[]>(() =>
     loadAbbreviationProfile()
   );
+  const [protectOriginals, setProtectOriginals] = useState<boolean>(() =>
+    loadProtectOriginalsPref()
+  );
   const [renameTrigger, setRenameTrigger] = useState<number>(0);
 
   const handleUpdateAbbreviations = useCallback((next: LibraryAbbreviation[]) => {
     setAbbreviations(next);
     saveAbbreviationProfile(next);
+  }, []);
+
+  const handleSetProtectOriginals = useCallback((next: boolean) => {
+    setProtectOriginals(next);
+    try {
+      window.localStorage.setItem(PROTECT_ORIGINALS_STORAGE_KEY, String(next));
+    } catch {
+      // Ignore storage errors
+    }
   }, []);
 
   const folderInputRef = useRef<HTMLInputElement | null>(null);
@@ -135,8 +171,11 @@ export default function App() {
         const fileObj = item.file || (await item.fileHandle?.getFile());
         if (!fileObj) return { ...item, parseError: 'Datei nicht lesbar' };
         const buf = await fileObj.arrayBuffer();
-        const parsed = parseMidiBuffer(buf);
-        return { ...item, file: fileObj, parsed };
+        const [parsed, sha256] = await Promise.all([
+          Promise.resolve(parseMidiBuffer(buf)),
+          computeSha256Hex(buf),
+        ]);
+        return { ...item, file: fileObj, parsed, sha256, originalSha256: sha256 };
       } catch (err) {
         return {
           ...item,
@@ -276,11 +315,18 @@ export default function App() {
   // Counts & Filtered/Sorted list
   const stats = useMemo(() => {
     let issues = 0;
+    let exactDuplicates = 0;
+    let variants = 0;
     let pending = 0;
     let keep = 0;
     let discard = 0;
     for (const e of entries) {
       if (e.parsed?.hasErrors || e.parsed?.hasWarnings || e.parseError) issues++;
+      const dup = duplicateMap.get(e.id);
+      if (dup) {
+        if (dup.kind === 'byte_exact' || dup.kind === 'note_exact') exactDuplicates++;
+        else variants++;
+      }
       if (e.triage === 'pending') pending++;
       else if (e.triage === 'keep') keep++;
       else if (e.triage === 'discard') discard++;
@@ -288,6 +334,8 @@ export default function App() {
     return {
       total: entries.length,
       issues,
+      exactDuplicates,
+      variants,
       duplicates: duplicateMap.size,
       pending,
       keep,
@@ -311,10 +359,26 @@ export default function App() {
             md.cues.some((c) => c.text.toLowerCase().includes(q)) ||
             md.textEvents.some((t) => t.text.toLowerCase().includes(q))
           : false;
+        const shaMatch = (e.sha256?.toLowerCase().includes(q) ?? false) ||
+          (e.originalSha256?.toLowerCase().includes(q) ?? false);
+        const perf = e.parsed?.performance;
+        const perfMatch = perf
+          ? perf.programChanges.some((pc) =>
+              getGmProgramName(pc.program).toLowerCase().includes(q)
+            ) ||
+            perf.channels.some(
+              (ch) =>
+                `ch ${ch.channel + 1}`.includes(q) ||
+                `ch${ch.channel + 1}`.includes(q) ||
+                `kanal ${ch.channel + 1}`.includes(q)
+            )
+          : false;
         if (
           !e.relativePath.toLowerCase().includes(q) &&
           !keyLabel.includes(q) &&
-          !metaMatch
+          !metaMatch &&
+          !shaMatch &&
+          !perfMatch
         ) {
           return false;
         }
@@ -322,8 +386,12 @@ export default function App() {
       if (filterMode === 'issues') {
         return Boolean(e.parsed?.hasErrors || e.parsed?.hasWarnings || e.parseError);
       }
-      if (filterMode === 'duplicates') {
-        return duplicateMap.has(e.id);
+      if (filterMode === 'exact_duplicates') {
+        const dup = duplicateMap.get(e.id);
+        return Boolean(dup && (dup.kind === 'byte_exact' || dup.kind === 'note_exact'));
+      }
+      if (filterMode === 'variants') {
+        return duplicateMap.get(e.id)?.kind === 'variant';
       }
       if (filterMode === 'pending') return e.triage === 'pending';
       if (filterMode === 'keep') return e.triage === 'keep';
@@ -379,6 +447,9 @@ export default function App() {
         if (da && !db) return -1;
         if (!da && db) return 1;
         if (da && db) {
+          const rank = (k: typeof da.kind) =>
+            k === 'byte_exact' ? 0 : k === 'note_exact' ? 1 : 2;
+          if (rank(da.kind) !== rank(db.kind)) return rank(da.kind) - rank(db.kind);
           if (da.groupId !== db.groupId) return da.groupId - db.groupId;
           if (da.similarity !== db.similarity) return db.similarity - da.similarity;
         }
@@ -474,6 +545,12 @@ export default function App() {
 
   const handleImmediateMoveSingle = async (entry: MidiFileEntry) => {
     if (!rootDirHandle || !canWriteToDisk) return;
+    if (protectOriginals) {
+      setErrorBanner(
+        'Originalschutz ist aktiv: Dateien können nicht direkt verschoben werden. Du kannst den Schutz oben deaktivieren.'
+      );
+      return;
+    }
     try {
       await moveEntryToSortedFolder(rootDirHandle, entry, '_Aussortiert');
       const idx = visibleEntries.findIndex((v) => v.id === entry.id);
@@ -495,6 +572,9 @@ export default function App() {
   };
 
   const handleExecuteDiskMoveAll = async () => {
+    if (protectOriginals) {
+      throw new Error('Originalschutz ist aktiv. Bitte zuerst oben entsperren.');
+    }
     if (!rootDirHandle) return;
     const toMove = entries.filter((e) => e.triage === 'discard');
     const movedIds = new Set<string>();
@@ -509,6 +589,9 @@ export default function App() {
   };
 
   const handleExecuteDiskDeleteAll = async () => {
+    if (protectOriginals) {
+      throw new Error('Originalschutz ist aktiv. Bitte zuerst oben entsperren.');
+    }
     const toDelete = entries.filter((e) => e.triage === 'discard');
     const deletedIds = new Set<string>();
     for (const item of toDelete) {
@@ -542,6 +625,7 @@ export default function App() {
       const currentBuf = await getEntrySourceBuffer(entry);
       const trimmedBuf = trimMidiBuffer(currentBuf, { trimStartTick, trimEndTick });
       const newParsed = parseMidiBuffer(trimmedBuf);
+      const trimmedSha = await computeSha256Hex(trimmedBuf);
 
       setEntries((prev) =>
         prev.map((item) =>
@@ -552,6 +636,8 @@ export default function App() {
                 trimmedBuffer: trimmedBuf,
                 parsed: newParsed,
                 sizeBytes: trimmedBuf.byteLength,
+                sha256: trimmedSha,
+                originalSha256: item.originalSha256 ?? item.sha256,
                 isTrimmed: true,
               }
             : item
@@ -568,6 +654,7 @@ export default function App() {
     if (!entry.originalBuffer) return;
     playerRef.current?.stop();
     const restoredParsed = parseMidiBuffer(entry.originalBuffer);
+    const restoredSha = entry.originalSha256 ?? (await computeSha256Hex(entry.originalBuffer));
     setEntries((prev) =>
       prev.map((item) =>
         item.id === entry.id
@@ -575,6 +662,8 @@ export default function App() {
               ...item,
               parsed: restoredParsed,
               sizeBytes: entry.originalBuffer!.byteLength,
+              sha256: restoredSha,
+              originalSha256: restoredSha,
               trimmedBuffer: undefined,
               isTrimmed: false,
             }
@@ -596,9 +685,19 @@ export default function App() {
 
   const handleOverwriteOriginal = async (entry: MidiFileEntry) => {
     if (!entry.trimmedBuffer) return;
+    if (protectOriginals) {
+      setErrorBanner(
+        'Originalschutz ist aktiv: Das Original darf nicht überschrieben werden. Bitte als Kopie speichern oder Schutz oben deaktivieren.'
+      );
+      return;
+    }
     try {
+      if (rootDirHandle) {
+        await backupOriginalBeforeOverwriteOnDisk(rootDirHandle, entry);
+      }
       await overwriteEntryOnDisk(entry, entry.trimmedBuffer);
       const updatedFile = entry.fileHandle ? await entry.fileHandle.getFile() : entry.file;
+      const updatedSha = await computeSha256Hex(entry.trimmedBuffer);
       setEntries((prev) =>
         prev.map((item) =>
           item.id === entry.id
@@ -607,6 +706,8 @@ export default function App() {
                 file: updatedFile,
                 originalBuffer: entry.trimmedBuffer,
                 trimmedBuffer: undefined,
+                sha256: updatedSha,
+                originalSha256: updatedSha,
                 isTrimmed: false,
               }
             : item
@@ -632,6 +733,9 @@ export default function App() {
     const newRelPath = entry.folderPath ? `${entry.folderPath}/${newFilename}` : newFilename;
 
     if (canWriteToDisk && entry.fileHandle && entry.parentDirHandle) {
+      if (protectOriginals) {
+        throw new Error('Originalschutz aktiv: Festplatten-Umbenennung ist gesperrt.');
+      }
       const { fileHandle, file } = await renameEntryOnDisk(entry, newFilename);
       setEntries((prev) =>
         prev.map((item) =>
@@ -694,9 +798,7 @@ export default function App() {
       <input
         ref={folderInputRef}
         type="file"
-        // @ts-expect-error webkitdirectory is a non-standard attribute supported across browsers
         webkitdirectory=""
-        directory=""
         multiple
         className="hidden"
         onChange={handleFallbackFolderInput}
@@ -722,13 +824,13 @@ export default function App() {
         {/* Zone 2: Search, Filter & Sort Controls (active when folder loaded) */}
         {entries.length > 0 ? (
           <div className="hidden lg:flex items-center gap-3 flex-1 justify-center min-w-0">
-            <div className="relative w-56">
+            <div className="relative w-52">
               <Search className="w-3.5 h-3.5 text-[#78818e] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Datei oder Tonart filtern..."
+                placeholder="Datei, Tonart oder Hash..."
                 className="w-full pl-8 pr-2.5 py-1.5 text-xs rounded bg-[#14171b] border border-[#2d333d] text-[#e2e5ea] placeholder:text-[#68717e] focus:outline-none focus:border-[#4ea1d3]"
               />
             </div>
@@ -738,7 +840,8 @@ export default function App() {
                 [
                   { id: 'all', label: `Alle (${stats.total})` },
                   { id: 'issues', label: `Auffällig (${stats.issues})` },
-                  { id: 'duplicates', label: `Duplikate (${stats.duplicates})` },
+                  { id: 'exact_duplicates', label: `Duplikate (${stats.exactDuplicates})` },
+                  { id: 'variants', label: `Varianten (${stats.variants})` },
                   { id: 'pending', label: `Offen (${stats.pending})` },
                   { id: 'keep', label: `Behalten (${stats.keep})` },
                   { id: 'discard', label: `Aussortiert (${stats.discard})` },
@@ -748,7 +851,7 @@ export default function App() {
                   key={tab.id}
                   type="button"
                   onClick={() => setFilterMode(tab.id)}
-                  className={`px-2.5 py-1 rounded text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
+                  className={`px-2 py-1 rounded text-xs font-medium whitespace-nowrap shrink-0 transition-colors ${
                     filterMode === tab.id
                       ? 'bg-[#2a313b] text-white'
                       : 'text-[#8992a0] hover:text-[#dce2ea]'
@@ -784,7 +887,30 @@ export default function App() {
         )}
 
         {/* Zone 3: Primary Action */}
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
+          {entries.length > 0 && (
+            <button
+              type="button"
+              onClick={() => handleSetProtectOriginals(!protectOriginals)}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
+                protectOriginals
+                  ? 'bg-emerald-950/50 border-emerald-700/60 text-emerald-300 hover:bg-emerald-950/80'
+                  : 'bg-amber-950/50 border-amber-700/60 text-amber-200 hover:bg-amber-950/80'
+              }`}
+              title={
+                protectOriginals
+                  ? 'Originalschutz AKTIV: Originaldateien werden nicht überschrieben, umbenannt, verschoben oder gelöscht. Trimmen erstellt Kopien. Klicken zum Entsperren.'
+                  : 'Originalschutz DEAKTIVIERT: Schreibzugriffe (inkl. automatischem Backup in _Originale_Backup beim Überschreiben) sind erlaubt. Klicken zum Aktivieren.'
+              }
+            >
+              {protectOriginals ? (
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              ) : (
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+              )}
+              <span>{protectOriginals ? 'Originalschutz' : 'Schutz aus'}</span>
+            </button>
+          )}
           {entries.length > 0 && (
             <button
               type="button"
@@ -928,7 +1054,7 @@ export default function App() {
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Datei oder Tonart..."
+                placeholder="Datei, Tonart oder Hash..."
                 className="flex-1 min-w-0 px-2.5 py-1 text-xs rounded bg-[#14171b] border border-[#2d333d] text-[#e2e5ea]"
               />
               <select
@@ -938,7 +1064,8 @@ export default function App() {
               >
                 <option value="all">Alle ({stats.total})</option>
                 <option value="issues">Auffällig ({stats.issues})</option>
-                <option value="duplicates">Duplikate ({stats.duplicates})</option>
+                <option value="exact_duplicates">Duplikate ({stats.exactDuplicates})</option>
+                <option value="variants">Varianten ({stats.variants})</option>
                 <option value="pending">Offen ({stats.pending})</option>
                 <option value="keep">Behalten ({stats.keep})</option>
                 <option value="discard">Aussortiert ({stats.discard})</option>
@@ -997,6 +1124,8 @@ export default function App() {
                 }
               }}
               canWriteToDisk={canWriteToDisk}
+              protectOriginals={protectOriginals}
+              onToggleProtectOriginals={() => handleSetProtectOriginals(!protectOriginals)}
               onImmediateMoveToSorted={handleImmediateMoveSingle}
               onTrimMidi={handleTrimMidi}
               onRestoreOriginalMidi={handleRestoreOriginalMidi}
@@ -1036,6 +1165,8 @@ export default function App() {
         discardedEntries={discardedEntries}
         folderName={folderName}
         canWriteToDisk={canWriteToDisk}
+        protectOriginals={protectOriginals}
+        onUnlockProtection={() => handleSetProtectOriginals(false)}
         onExecuteDiskMove={handleExecuteDiskMoveAll}
         onExecuteDiskDelete={handleExecuteDiskDeleteAll}
       />

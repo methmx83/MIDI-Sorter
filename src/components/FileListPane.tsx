@@ -187,18 +187,36 @@ export const FileListPane: React.FC<FileListPaneProps> = ({
 
                   {/* Status icons & quick hover actions anchored to trailing edge of Column 1 */}
                   <div className="ml-auto flex items-center gap-1.5 shrink-0 pl-1">
-                    {dup && (
-                      <span
-                        className={`inline-flex items-center gap-0.5 text-[10px] font-mono tabular-nums ${
-                          dup.kind === 'exact' ? 'text-amber-300' : 'text-violet-300'
-                        }`}
-                        title={`${
-                          dup.kind === 'exact' ? 'Exaktes Duplikat' : 'Ähnliche Variante'
-                        } (${dup.similarity}% · Gruppe #${dup.groupId}, ${dup.peers.length + 1} Dateien)`}
-                      >
-                        <Copy className="w-2.5 h-2.5" />#{dup.groupId}
-                      </span>
-                    )}
+                    {dup && (() => {
+                      const badgeCls =
+                        dup.kind === 'byte_exact'
+                          ? 'text-amber-300'
+                          : dup.kind === 'note_exact'
+                          ? 'text-sky-300'
+                          : 'text-violet-300';
+                      const badgePrefix =
+                        dup.kind === 'byte_exact'
+                          ? 'SHA'
+                          : dup.kind === 'note_exact'
+                          ? '≡'
+                          : '~';
+                      const badgeTitle =
+                        dup.kind === 'byte_exact'
+                          ? `Byte-identisches Duplikat (SHA-256 identisch · Gruppe #${dup.groupId}, ${dup.peers.length + 1} Dateien)`
+                          : dup.kind === 'note_exact'
+                          ? `Noten-identisches Duplikat (gleiche Noten, anderer Header/Vorlauf · Gruppe #${dup.groupId}, ${dup.peers.length + 1} Dateien)`
+                          : `Musikalische Variante (${dup.similarity}% Ähnlichkeit · Gruppe #${dup.groupId}, ${dup.peers.length + 1} Dateien)`;
+
+                      return (
+                        <span
+                          className={`inline-flex items-center gap-0.5 text-[10px] font-mono tabular-nums ${badgeCls}`}
+                          title={badgeTitle}
+                        >
+                          <Copy className="w-2.5 h-2.5" />
+                          {badgePrefix}#{dup.groupId}
+                        </span>
+                      );
+                    })()}
                     {parsed && parsed.metadata.totalCount > 0 && (() => {
                       const md = parsed.metadata;
                       const hints: string[] = [];

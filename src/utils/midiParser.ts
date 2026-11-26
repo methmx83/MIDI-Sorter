@@ -1,9 +1,15 @@
 import type {
+  MidiAftertouchEvent,
+  MidiChannelSummary,
+  MidiControlChangeEvent,
   MidiIssue,
   MidiMetadata,
   MidiMetaEventType,
   MidiMetaTextItem,
   MidiNote,
+  MidiPerformanceEvents,
+  MidiPitchBendEvent,
+  MidiProgramChangeEvent,
   MidiTempoEvent,
   MidiTimeSignature,
   MidiTrackSummary,
@@ -200,6 +206,17 @@ function createEmptyMetadata(): MidiMetadata {
   };
 }
 
+function createEmptyPerformance(): MidiPerformanceEvents {
+  return {
+    controlChanges: [],
+    pitchBends: [],
+    aftertouch: [],
+    programChanges: [],
+    channels: [],
+    totalCount: 0,
+  };
+}
+
 export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
   const bytes = new Uint8Array(buffer);
   const reader = new ByteReader(bytes);
@@ -264,6 +281,35 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
     trackIndex: number;
     startTick: number;
     durationTick: number;
+  }> = [];
+
+  const rawControlChanges: Array<{
+    tick: number;
+    channel: number;
+    trackIndex: number;
+    controller: number;
+    value: number;
+  }> = [];
+  const rawPitchBends: Array<{
+    tick: number;
+    channel: number;
+    trackIndex: number;
+    rawValue: number;
+    value: number;
+  }> = [];
+  const rawAftertouch: Array<{
+    kind: 'channel' | 'poly';
+    tick: number;
+    channel: number;
+    trackIndex: number;
+    pitch?: number;
+    pressure: number;
+  }> = [];
+  const rawProgramChanges: Array<{
+    tick: number;
+    channel: number;
+    trackIndex: number;
+    program: number;
   }> = [];
 
   const tempos: MidiTempoEvent[] = [];
@@ -406,12 +452,29 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
         const channel = status & 0x0f;
 
         if (type === 0xc0 || type === 0xd0) {
-          // 1 data byte
+          // 1 data byte: Program Change (0xC0) or Channel Aftertouch (0xD0)
           if (reader.offset >= safeEnd) {
             trackTruncated = true;
             break;
           }
-          reader.readUint8();
+          const d1 = reader.readUint8() & 0x7f;
+          trackChannels.add(channel);
+          if (type === 0xc0) {
+            rawProgramChanges.push({
+              tick,
+              channel,
+              trackIndex,
+              program: d1,
+            });
+          } else {
+            rawAftertouch.push({
+              kind: 'channel',
+              tick,
+              channel,
+              trackIndex,
+              pressure: d1,
+            });
+          }
         } else if (
           type === 0x80 ||
           type === 0x90 ||
@@ -434,6 +497,7 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
             activeNotes.set(key, list);
             trackNoteCount++;
           } else if (type === 0x80 || (type === 0x90 && d2 === 0)) {
+            trackChannels.add(channel);
             const pitch = d1 & 0x7f;
             const key = channel * 128 + pitch;
             const list = activeNotes.get(key);
@@ -449,6 +513,37 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
                 durationTick,
               });
             }
+          } else if (type === 0xa0) {
+            trackChannels.add(channel);
+            rawAftertouch.push({
+              kind: 'poly',
+              tick,
+              channel,
+              trackIndex,
+              pitch: d1 & 0x7f,
+              pressure: d2 & 0x7f,
+            });
+          } else if (type === 0xb0) {
+            trackChannels.add(channel);
+            rawControlChanges.push({
+              tick,
+              channel,
+              trackIndex,
+              controller: d1 & 0x7f,
+              value: d2 & 0x7f,
+            });
+          } else if (type === 0xe0) {
+            trackChannels.add(channel);
+            const lsb = d1 & 0x7f;
+            const msb = d2 & 0x7f;
+            const rawValue = (msb << 7) | lsb;
+            rawPitchBends.push({
+              tick,
+              channel,
+              trackIndex,
+              rawValue,
+              value: rawValue - 8192,
+            });
           }
         }
       }
@@ -699,6 +794,101 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
     lyrics.length +
     (embeddedKeySignature ? 1 : 0);
 
+  const controlChanges: MidiControlChangeEvent[] = rawControlChanges
+    .map((ev) => ({
+      ...ev,
+      sec: tickToSeconds(ev.tick),
+    }))
+    .sort((a, b) => a.tick - b.tick || a.channel - b.channel || a.controller - b.controller);
+
+  const pitchBends: MidiPitchBendEvent[] = rawPitchBends
+    .map((ev) => ({
+      ...ev,
+      sec: tickToSeconds(ev.tick),
+    }))
+    .sort((a, b) => a.tick - b.tick || a.channel - b.channel);
+
+  const aftertouch: MidiAftertouchEvent[] = rawAftertouch
+    .map((ev) => ({
+      ...ev,
+      sec: tickToSeconds(ev.tick),
+    }))
+    .sort((a, b) => a.tick - b.tick || a.channel - b.channel);
+
+  const programChanges: MidiProgramChangeEvent[] = rawProgramChanges
+    .map((ev) => ({
+      ...ev,
+      sec: tickToSeconds(ev.tick),
+    }))
+    .sort((a, b) => a.tick - b.tick || a.channel - b.channel);
+
+  // Per-channel performance summary across all 16 MIDI channels
+  const channelMap = new Map<
+    number,
+    {
+      noteCount: number;
+      programs: Set<number>;
+      ccNumbers: Set<number>;
+      ccCount: number;
+      pitchBendCount: number;
+      aftertouchCount: number;
+    }
+  >();
+  const ensureCh = (ch: number) => {
+    let entry = channelMap.get(ch);
+    if (!entry) {
+      entry = {
+        noteCount: 0,
+        programs: new Set<number>(),
+        ccNumbers: new Set<number>(),
+        ccCount: 0,
+        pitchBendCount: 0,
+        aftertouchCount: 0,
+      };
+      channelMap.set(ch, entry);
+    }
+    return entry;
+  };
+
+  for (const n of notes) ensureCh(n.channel).noteCount++;
+  for (const pc of programChanges) ensureCh(pc.channel).programs.add(pc.program);
+  for (const cc of controlChanges) {
+    const ch = ensureCh(cc.channel);
+    ch.ccCount++;
+    ch.ccNumbers.add(cc.controller);
+  }
+  for (const pb of pitchBends) ensureCh(pb.channel).pitchBendCount++;
+  for (const at of aftertouch) ensureCh(at.channel).aftertouchCount++;
+  for (const tr of tracks) {
+    for (const ch of tr.channels) ensureCh(ch);
+  }
+
+  const channels: MidiChannelSummary[] = Array.from(channelMap.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([channel, info]) => ({
+      channel,
+      noteCount: info.noteCount,
+      programs: Array.from(info.programs).sort((a, b) => a - b),
+      ccNumbers: Array.from(info.ccNumbers).sort((a, b) => a - b),
+      ccCount: info.ccCount,
+      pitchBendCount: info.pitchBendCount,
+      aftertouchCount: info.aftertouchCount,
+      isDrum: channel === 9,
+    }));
+
+  const performance: MidiPerformanceEvents = {
+    controlChanges,
+    pitchBends,
+    aftertouch,
+    programChanges,
+    channels,
+    totalCount:
+      controlChanges.length +
+      pitchBends.length +
+      aftertouch.length +
+      programChanges.length,
+  };
+
   const metadata: MidiMetadata = {
     copyright,
     sequenceName,
@@ -736,6 +926,7 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
     detectedKey: keyAnalysis.primary,
     isPercussionOnly: keyAnalysis.isPercussionOnly,
     metadata,
+    performance,
     issues,
     hasErrors: issues.some((i) => i.severity === 'error'),
     hasWarnings: issues.some((i) => i.severity === 'warning'),
@@ -768,6 +959,7 @@ function buildInvalidMidi(detail: string): ParsedMidi {
     detectedKey: null,
     isPercussionOnly: false,
     metadata: createEmptyMetadata(),
+    performance: createEmptyPerformance(),
     issues: [
       {
         code: 'invalid_header',
@@ -891,6 +1083,9 @@ export function createDemoMidiFiles(): File[] {
   const spicEvents: RawEventSpec[] = [
     { tick: 0, bytes: [0xff, 0x51, 0x03, 0x07, 0xa1, 0x20] }, // 120 BPM
     { tick: 0, bytes: [0xff, 0x59, 0x02, 0xfd, 0x01] }, // c-Moll key signature
+    { tick: 0, bytes: [0xc0, 48] }, // GM Program 48: String Ensemble 1
+    { tick: 0, bytes: [0xb0, 1, 72] }, // CC1 Modulation
+    { tick: 0, bytes: [0xb0, 11, 110] }, // CC11 Expression
     metaEvent(0, 0x02, '© 2026 Studio Demo Archive'),
     metaEvent(0, 0x04, 'Strings Spiccato Ensemble'),
     metaEvent(0, 0x01, '16-Takt Streicher-Ostinato, quantisiert auf 1/16'),
@@ -900,6 +1095,7 @@ export function createDemoMidiFiles(): File[] {
   const scale = [60, 62, 63, 67, 68, 72, 74, 75];
   for (let b = 0; b < 16; b++) {
     if (b === 7 || b === 15) continue; // brief phrase breath
+    spicEvents.push({ tick: b * bar, bytes: [0xb0, 11, Math.min(127, 84 + b * 2)] }); // Expression swell
     for (let s = 0; s < 16; s++) {
       if (s % 2 === 0 || (b % 4 === 3 && s > 10)) {
         const pitch = scale[(b * 3 + s) % scale.length] + (b >= 8 ? 12 : 0);
@@ -914,6 +1110,7 @@ export function createDemoMidiFiles(): File[] {
   const pianoEvents: RawEventSpec[] = [
     { tick: 0, bytes: [0xff, 0x51, 0x03, 0x09, 0x27, 0xc0] }, // 100 BPM
     { tick: 0, bytes: [0xff, 0x59, 0x02, 0x00, 0x00] }, // C-Dur key signature
+    { tick: 0, bytes: [0xc0, 0] }, // GM Program 0: Acoustic Grand Piano
     metaEvent(0, 0x02, '© SoundLab Piano Sketches'),
     metaEvent(0, 0x04, 'Concert Grand Piano'),
     metaEvent(0, 0x06, 'Thema A'),
@@ -928,6 +1125,11 @@ export function createDemoMidiFiles(): File[] {
   ];
   for (let b = 0; b < 12; b++) {
     const ch = chords[b % chords.length];
+    pianoEvents.push({ tick: b * bar, bytes: [0xb0, 64, 127] }); // Sustain pedal down
+    pianoEvents.push({ tick: b * bar + bar - 30, bytes: [0xb0, 64, 0] }); // Sustain pedal release
+    if (b === 4) {
+      pianoEvents.push({ tick: b * bar, bytes: [0xd0, 54] }); // Channel Aftertouch
+    }
     for (let i = 0; i < 8; i++) {
       const note = ch[i % ch.length] + (i >= 5 ? 12 : 0);
       pianoEvents.push(...noteEvents(note, b * bar + i * (beat / 2), beat * 0.45, 78 + (i % 3) * 8));

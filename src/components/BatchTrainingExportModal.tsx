@@ -50,7 +50,7 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
 }) => {
   const [activeTab, setActiveTab] = useState<'export' | 'abbreviations'>(initialTab);
   const [scope, setScope] = useState<'keep' | 'valid'>('keep');
-  const [excludeDuplicates, setExcludeDuplicates] = useState<boolean>(false);
+  const [dedupeMode, setDedupeMode] = useState<'none' | 'exact' | 'all'>('exact');
 
   const [newKey, setNewKey] = useState<string>('');
   const [newMeaning, setNewMeaning] = useState<string>('');
@@ -85,22 +85,44 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
 
   const targetEntries = useMemo(() => {
     const base = effectiveScope === 'keep' ? keepEntries : validEntries;
-    if (!excludeDuplicates) return base;
+    if (dedupeMode === 'none') return base;
 
-    // Keep first member of each duplicate group, skip redundant clones
-    const seenGroups = new Set<number>();
+    const seenHashes = new Set<string>();
+    const seenExactNoteGroups = new Set<number>();
+    const seenAllGroups = new Set<number>();
+
     return base.filter((item) => {
       const dup = duplicateMap.get(item.id);
+      if (dedupeMode === 'exact') {
+        if (item.sha256) {
+          if (seenHashes.has(item.sha256)) return false;
+          seenHashes.add(item.sha256);
+        }
+        if (dup && (dup.kind === 'byte_exact' || dup.kind === 'note_exact')) {
+          if (seenExactNoteGroups.has(dup.groupId)) return false;
+          seenExactNoteGroups.add(dup.groupId);
+        }
+        return true;
+      }
+
       if (!dup) return true;
-      if (seenGroups.has(dup.groupId)) return false;
-      seenGroups.add(dup.groupId);
+      if (seenAllGroups.has(dup.groupId)) return false;
+      seenAllGroups.add(dup.groupId);
       return true;
     });
-  }, [effectiveScope, keepEntries, validEntries, excludeDuplicates, duplicateMap]);
+  }, [effectiveScope, keepEntries, validEntries, dedupeMode, duplicateMap]);
 
-  const duplicateCountInBase = useMemo(() => {
+  const { exactCountInBase, variantCountInBase } = useMemo(() => {
     const base = effectiveScope === 'keep' ? keepEntries : validEntries;
-    return base.filter((e) => duplicateMap.has(e.id)).length;
+    let exact = 0;
+    let variant = 0;
+    for (const e of base) {
+      const dup = duplicateMap.get(e.id);
+      if (!dup) continue;
+      if (dup.kind === 'byte_exact' || dup.kind === 'note_exact') exact++;
+      else variant++;
+    }
+    return { exactCountInBase: exact, variantCountInBase: variant };
   }, [effectiveScope, keepEntries, validEntries, duplicateMap]);
 
   if (!isOpen) return null;
@@ -280,27 +302,38 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
               </div>
             </div>
 
-            {/* Duplicate Handling Option */}
-            {duplicateCountInBase > 0 && (
-              <label className="flex items-start gap-2.5 p-3 rounded bg-[#231f16] border border-amber-700/40 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={excludeDuplicates}
-                  onChange={(e) => setExcludeDuplicates(e.target.checked)}
-                  className="mt-0.5 rounded border-[#434c59] bg-[#16191d] accent-[#5eb1e6]"
-                />
-                <div className="space-y-0.5">
-                  <div className="font-medium text-amber-200 flex items-center gap-1.5">
-                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    <span>
-                      Erkannte Duplikate/Varianten automatisch deduplizieren ({duplicateCountInBase} betroffene Dateien)
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-amber-200/75">
-                    Behält pro Duplikat-Gruppe nur die erste Version im Export, damit dein Modell keine Doppelungen übergewichtet.
-                  </div>
+            {/* Duplicate & Variant Handling Options */}
+            {(exactCountInBase > 0 || variantCountInBase > 0) && (
+              <div className="p-3 rounded bg-[#231f16] border border-amber-700/40 space-y-2">
+                <div className="font-medium text-amber-200 flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span>
+                    Deduplizierung: {exactCountInBase} exakte Duplikate · {variantCountInBase} musikalische Varianten
+                  </span>
                 </div>
-              </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {(
+                    [
+                      { id: 'exact', label: 'Nur exakte Duplikate entfernen (Empfohlen)' },
+                      { id: 'all', label: 'Duplikate + Varianten entfernen' },
+                      { id: 'none', label: 'Alle behalten' },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setDedupeMode(opt.id)}
+                      className={`px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ${
+                        dedupeMode === opt.id
+                          ? 'bg-amber-500/20 border-amber-400/70 text-amber-100'
+                          : 'bg-[#171510] border-[#3d3423] text-[#c7b999] hover:text-white'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             )}
 
             {/* Export Actions */}

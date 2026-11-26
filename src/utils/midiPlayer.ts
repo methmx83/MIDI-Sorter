@@ -101,6 +101,8 @@ export class WebMidiPlayer {
   private midiChannelRouting: MidiChannelRouting = loadSavedChannelRouting();
   private pendingMidiNoteOffs: PendingMidiNoteOff[] = [];
   private soundingMidiNotes: Map<string, { channel: number; pitch: number }> = new Map();
+  private perfEvents: Array<{ sec: number; tick: number; channel: number; bytes: [number, number] | [number, number, number] }> = [];
+  private nextPerfIdx = 0;
 
   private ensureAudioContext(): AudioContext {
     if (!this.ctx) {
@@ -225,6 +227,7 @@ export class WebMidiPlayer {
           out.send([0xb0 | ch, 64, 0]); // Sustain pedal off
           out.send([0xb0 | ch, 123, 0]); // All Notes Off
           out.send([0xb0 | ch, 120, 0]); // All Sound Off
+          out.send([0xe0 | ch, 0x00, 0x40]); // Reset Pitch Bend to center
         }
       } catch {
         // Output may have been disconnected
@@ -332,6 +335,10 @@ export class WebMidiPlayer {
       if (this.nextNoteIdx === -1) {
         this.nextNoteIdx = this.midi.notes.length;
       }
+      this.nextPerfIdx = this.perfEvents.findIndex((ev) => ev.sec >= currentPos - 0.01);
+      if (this.nextPerfIdx === -1) {
+        this.nextPerfIdx = this.perfEvents.length;
+      }
       this.scheduleLookahead();
     }
 
@@ -344,6 +351,65 @@ export class WebMidiPlayer {
     this.overrideBpm = null;
     this.offsetSec = 0;
     this.nextNoteIdx = 0;
+    this.nextPerfIdx = 0;
+    this.perfEvents = [];
+
+    if (midi?.performance) {
+      const combined: Array<{
+        sec: number;
+        tick: number;
+        channel: number;
+        bytes: [number, number] | [number, number, number];
+      }> = [];
+
+      for (const pc of midi.performance.programChanges) {
+        combined.push({
+          sec: pc.sec,
+          tick: pc.tick,
+          channel: pc.channel & 0x0f,
+          bytes: [0xc0, pc.program & 0x7f],
+        });
+      }
+      for (const cc of midi.performance.controlChanges) {
+        if (cc.controller >= 120) continue; // skip channel mode panic CCs during playback
+        combined.push({
+          sec: cc.sec,
+          tick: cc.tick,
+          channel: cc.channel & 0x0f,
+          bytes: [0xb0, cc.controller & 0x7f, cc.value & 0x7f],
+        });
+      }
+      for (const pb of midi.performance.pitchBends) {
+        const lsb = pb.rawValue & 0x7f;
+        const msb = (pb.rawValue >> 7) & 0x7f;
+        combined.push({
+          sec: pb.sec,
+          tick: pb.tick,
+          channel: pb.channel & 0x0f,
+          bytes: [0xe0, lsb, msb],
+        });
+      }
+      for (const at of midi.performance.aftertouch) {
+        if (at.kind === 'channel') {
+          combined.push({
+            sec: at.sec,
+            tick: at.tick,
+            channel: at.channel & 0x0f,
+            bytes: [0xd0, at.pressure & 0x7f],
+          });
+        } else {
+          combined.push({
+            sec: at.sec,
+            tick: at.tick,
+            channel: at.channel & 0x0f,
+            bytes: [0xa0, (at.pitch ?? 60) & 0x7f, at.pressure & 0x7f],
+          });
+        }
+      }
+      combined.sort((a, b) => a.sec - b.sec || a.tick - b.tick);
+      this.perfEvents = combined;
+    }
+
     this.emit();
     if (autoPlay && midi && midi.notes.length > 0) {
       this.play(0);
@@ -365,6 +431,10 @@ export class WebMidiPlayer {
     this.nextNoteIdx = this.midi.notes.findIndex((n) => n.startSec >= this.offsetSec - 0.01);
     if (this.nextNoteIdx === -1) {
       this.nextNoteIdx = this.midi.notes.length;
+    }
+    this.nextPerfIdx = this.perfEvents.findIndex((ev) => ev.sec >= this.offsetSec - 0.01);
+    if (this.nextPerfIdx === -1) {
+      this.nextPerfIdx = this.perfEvents.length;
     }
 
     this.isPlaying = true;
@@ -404,6 +474,7 @@ export class WebMidiPlayer {
     this.isPlaying = false;
     this.offsetSec = 0;
     this.nextNoteIdx = 0;
+    this.nextPerfIdx = 0;
     this.clearTimers();
     this.stopScheduledNodes();
     this.emit();
@@ -484,6 +555,31 @@ export class WebMidiPlayer {
         }
       }
       this.pendingMidiNoteOffs = remaining;
+    }
+
+    // 1b. Schedule CC / Pitch Bend / Aftertouch / Program Change for external Web MIDI output
+    if (midiOut) {
+      while (this.nextPerfIdx < this.perfEvents.length) {
+        const pev = this.perfEvents[this.nextPerfIdx];
+        if (pev.sec > horizonSec) break;
+        this.nextPerfIdx++;
+
+        const deltaMidi = pev.sec - currentSongSec;
+        if (deltaMidi < -0.05 * rate) continue;
+
+        const deltaReal = Math.max(0, deltaMidi / rate);
+        const scheduleAt = nowPerf + deltaReal * 1000;
+        const ch = this.midiChannelRouting === 'ch1' ? 0 : pev.channel;
+        const msg =
+          pev.bytes.length === 2
+            ? [pev.bytes[0] | ch, pev.bytes[1]]
+            : [pev.bytes[0] | ch, pev.bytes[1], pev.bytes[2]];
+        try {
+          midiOut.send(msg, scheduleAt);
+        } catch {
+          // ignore disconnected output
+        }
+      }
     }
 
     // 2. Schedule upcoming Note-Ons

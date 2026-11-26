@@ -86,6 +86,62 @@ export interface MidiMetadata {
   totalCount: number;
 }
 
+export interface MidiControlChangeEvent {
+  tick: number;
+  sec: number;
+  channel: number; // 0..15
+  trackIndex: number;
+  controller: number; // 0..127
+  value: number; // 0..127
+}
+
+export interface MidiPitchBendEvent {
+  tick: number;
+  sec: number;
+  channel: number; // 0..15
+  trackIndex: number;
+  rawValue: number; // 0..16383 (8192 = center)
+  value: number; // -8192..+8191
+}
+
+export interface MidiAftertouchEvent {
+  kind: 'channel' | 'poly';
+  tick: number;
+  sec: number;
+  channel: number; // 0..15
+  trackIndex: number;
+  pitch?: number; // 0..127 for polyphonic key pressure
+  pressure: number; // 0..127
+}
+
+export interface MidiProgramChangeEvent {
+  tick: number;
+  sec: number;
+  channel: number; // 0..15
+  trackIndex: number;
+  program: number; // 0..127
+}
+
+export interface MidiChannelSummary {
+  channel: number; // 0..15 (display 1..16)
+  noteCount: number;
+  programs: number[];
+  ccNumbers: number[];
+  ccCount: number;
+  pitchBendCount: number;
+  aftertouchCount: number;
+  isDrum: boolean;
+}
+
+export interface MidiPerformanceEvents {
+  controlChanges: MidiControlChangeEvent[];
+  pitchBends: MidiPitchBendEvent[];
+  aftertouch: MidiAftertouchEvent[];
+  programChanges: MidiProgramChangeEvent[];
+  channels: MidiChannelSummary[];
+  totalCount: number;
+}
+
 export interface ParsedMidi {
   format: number;
   ppqn: number;
@@ -111,6 +167,7 @@ export interface ParsedMidi {
   detectedKey: DetectedKey | null;
   isPercussionOnly: boolean;
   metadata: MidiMetadata;
+  performance: MidiPerformanceEvents;
   issues: MidiIssue[];
   hasErrors: boolean;
   hasWarnings: boolean;
@@ -123,6 +180,8 @@ export interface MidiFileEntry {
   folderPath: string;
   sizeBytes: number;
   lastModified: number;
+  sha256?: string;
+  originalSha256?: string;
   file?: File;
   fileHandle?: FileSystemFileHandle;
   parentDirHandle?: FileSystemDirectoryHandle;

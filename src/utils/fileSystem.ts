@@ -52,8 +52,14 @@ async function scanDirectoryHandle(
         triage: 'pending',
       });
     } else if (handle.kind === 'directory') {
-      // Skip hidden or already-sorted trash folders
-      if (handle.name.startsWith('.') || handle.name === '_Aussortiert') continue;
+      // Skip hidden, trash, or automatic backup folders
+      if (
+        handle.name.startsWith('.') ||
+        handle.name === '_Aussortiert' ||
+        handle.name === '_Originale_Backup'
+      ) {
+        continue;
+      }
       const subPrefix = prefix ? `${prefix}/${handle.name}` : handle.name;
       await scanDirectoryHandle(handle as FileSystemDirectoryHandle, subPrefix, out);
     }
@@ -148,7 +154,7 @@ async function readEntryFiles(
       out.push({ file, relativePath, folderPath: prefix });
     }
   } else if (entry.isDirectory) {
-    if (entry.name === '_Aussortiert') return;
+    if (entry.name === '_Aussortiert' || entry.name === '_Originale_Backup') return;
     const dirEntry = entry as FileSystemDirectoryEntry;
     const reader = dirEntry.createReader();
     const readAllBatch = async (): Promise<FileSystemEntry[]> => {
@@ -325,6 +331,42 @@ export function buildCleanupScript(
   return lines.join('\n') + '\n';
 }
 
+export async function backupOriginalBeforeOverwriteOnDisk(
+  rootDir: FileSystemDirectoryHandle,
+  entry: MidiFileEntry
+): Promise<string> {
+  if (!entry.fileHandle) {
+    throw new Error('Kein Schreibzugriff auf die lokale Datei.');
+  }
+  const backupDir = await rootDir.getDirectoryHandle('_Originale_Backup', { create: true });
+  const sourceFile = await entry.fileHandle.getFile();
+  const baseSafe = entry.folderPath
+    ? `${entry.folderPath.replaceAll('/', '__')}__${entry.name}`
+    : entry.name;
+
+  const dotIdx = baseSafe.lastIndexOf('.');
+  const stem = dotIdx > 0 ? baseSafe.slice(0, dotIdx) : baseSafe;
+  const ext = dotIdx > 0 ? baseSafe.slice(dotIdx) : '.mid';
+
+  let candidate = baseSafe;
+  let counter = 2;
+  while (counter < 100) {
+    try {
+      await backupDir.getFileHandle(candidate, { create: false });
+      candidate = `${stem}_v${counter}${ext}`;
+      counter++;
+    } catch {
+      break;
+    }
+  }
+
+  const destHandle = await backupDir.getFileHandle(candidate, { create: true });
+  const writable = await destHandle.createWritable();
+  await writable.write(await sourceFile.arrayBuffer());
+  await writable.close();
+  return `_Originale_Backup/${candidate}`;
+}
+
 export async function overwriteEntryOnDisk(
   entry: MidiFileEntry,
   buffer: ArrayBuffer
@@ -348,7 +390,20 @@ export async function saveTrimmedCopyOnDisk(
   const dotIdx = entry.name.lastIndexOf('.');
   const base = dotIdx > 0 ? entry.name.slice(0, dotIdx) : entry.name;
   const ext = dotIdx > 0 ? entry.name.slice(dotIdx) : '.mid';
-  const newName = `${base}${suffix}${ext}`;
+
+  // Never silently overwrite an existing file when saving a trimmed copy
+  let newName = `${base}${suffix}${ext}`;
+  let counter = 2;
+  while (counter < 100) {
+    try {
+      await entry.parentDirHandle.getFileHandle(newName, { create: false });
+      newName = `${base}${suffix}_${counter}${ext}`;
+      counter++;
+    } catch {
+      break;
+    }
+  }
+
   const destHandle = await entry.parentDirHandle.getFileHandle(newName, { create: true });
   const writable = await destHandle.createWritable();
   await writable.write(buffer);

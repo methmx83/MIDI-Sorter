@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
   AlertTriangle,
   Bookmark,
   Cable,
@@ -11,6 +12,8 @@ import {
   Download,
   FileText,
   Gauge,
+  Hash,
+  Lock,
   Maximize2,
   Minus,
   Music2,
@@ -22,6 +25,8 @@ import {
   RotateCcw,
   Save,
   Scissors,
+  ShieldCheck,
+  Sliders,
   Trash2,
   Volume2,
   VolumeX,
@@ -32,6 +37,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import type { MidiFileEntry, MidiNote, TriageStatus } from '../types/midi';
+import { getGmProgramName, getMidiCcLabel } from '../utils/midiConstants';
 import type { DuplicateMatchInfo } from '../utils/midiDuplicates';
 import { formatBytes, formatDuration, midiPitchToName } from '../utils/midiParser';
 import type { MidiChannelRouting, MidiPlaybackState } from '../utils/midiPlayer';
@@ -57,6 +63,8 @@ interface MidiPianoRollProps {
   onMidiPanic: () => void;
   onTriage: (status: TriageStatus) => void;
   canWriteToDisk: boolean;
+  protectOriginals: boolean;
+  onToggleProtectOriginals?: () => void;
   onImmediateMoveToSorted?: (entry: MidiFileEntry) => void;
   onTrimMidi: (
     entry: MidiFileEntry,
@@ -103,6 +111,8 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   onMidiPanic,
   onTriage,
   canWriteToDisk,
+  protectOriginals,
+  onToggleProtectOriginals,
   onImmediateMoveToSorted,
   onTrimMidi,
   onRestoreOriginalMidi,
@@ -131,6 +141,8 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   const [volume, setVolume] = useState<number>(0.75);
   const [isEditingBpm, setIsEditingBpm] = useState<boolean>(false);
   const [bpmDraft, setBpmDraft] = useState<string>('');
+  const [copiedHash, setCopiedHash] = useState<boolean>(false);
+  const [confirmOverwrite, setConfirmOverwrite] = useState<boolean>(false);
   const [hoveredNote, setHoveredNote] = useState<{
     note: MidiNote;
     x: number;
@@ -154,6 +166,16 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   const [renameBase, setRenameBase] = useState<string>('');
   const [renameError, setRenameError] = useState<string | null>(null);
   const [renameBusy, setRenameBusy] = useState<boolean>(false);
+
+  const handleCopySha256 = async (hash: string) => {
+    try {
+      await navigator.clipboard.writeText(hash);
+      setCopiedHash(true);
+      window.setTimeout(() => setCopiedHash(false), 1800);
+    } catch {
+      // Clipboard API unavailable
+    }
+  };
 
   const splitExtension = (name: string): { base: string; ext: string } => {
     const match = name.match(/^(.*?)(\.(?:mid|midi))$/i);
@@ -194,7 +216,13 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
     setRenameError(null);
     setMetaExpanded(false);
     setIsEditingBpm(false);
+    setCopiedHash(false);
+    setConfirmOverwrite(false);
   }, [entry?.id]);
+
+  useEffect(() => {
+    setConfirmOverwrite(false);
+  }, [entry?.isTrimmed, protectOriginals]);
 
   const runSmartTrimSilence = async () => {
     if (!entry || !parsed) return;
@@ -904,6 +932,12 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
+                if (canWriteToDisk && protectOriginals) {
+                  setRenameError(
+                    'Originalschutz aktiv: Festplatten-Umbenennung ist gesperrt.'
+                  );
+                  return;
+                }
                 const trimmed = renameBase.trim();
                 if (!trimmed) {
                   setRenameError('Dateiname darf nicht leer sein.');
@@ -934,12 +968,12 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
               }}
               className="space-y-1"
             >
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <input
                   ref={renameInputRef}
                   type="text"
                   value={renameBase}
-                  disabled={renameBusy}
+                  disabled={renameBusy || (canWriteToDisk && protectOriginals)}
                   onChange={(e) => {
                     setRenameBase(e.target.value);
                     if (renameError) setRenameError(null);
@@ -951,7 +985,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                       setRenameError(null);
                     }
                   }}
-                  className="px-2.5 py-1 text-sm font-medium rounded bg-[#13161a] border border-[#4ea1d3] text-white focus:outline-none min-w-[200px] max-w-[360px] flex-1"
+                  className="px-2.5 py-1 text-sm font-medium rounded bg-[#13161a] border border-[#4ea1d3] text-white disabled:opacity-50 focus:outline-none min-w-[200px] max-w-[360px] flex-1"
                   aria-label="Neuer Dateiname"
                 />
                 <span className="text-xs font-mono text-[#7f8895]">
@@ -959,7 +993,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                 </span>
                 <button
                   type="submit"
-                  disabled={renameBusy}
+                  disabled={renameBusy || (canWriteToDisk && protectOriginals)}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium bg-[#3675a3] hover:bg-[#4187ba] disabled:opacity-40 text-white transition-colors"
                 >
                   <Check className="w-3.5 h-3.5" />
@@ -977,6 +1011,21 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
+                {canWriteToDisk && protectOriginals && (
+                  <span className="inline-flex items-center gap-1.5 text-xs text-emerald-300 ml-1">
+                    <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                    <span>Originalschutz aktiv</span>
+                    {onToggleProtectOriginals && (
+                      <button
+                        type="button"
+                        onClick={onToggleProtectOriginals}
+                        className="underline text-[#8fc8e8] hover:text-white"
+                      >
+                        Entsperren
+                      </button>
+                    )}
+                  </span>
+                )}
               </div>
               {renameError && <p className="text-xs text-rose-400">{renameError}</p>}
             </form>
@@ -988,11 +1037,23 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
               <button
                 type="button"
                 onClick={openRenameMode}
-                className="p-1 rounded text-[#838d9b] hover:text-[#7cc4f0] hover:bg-[#272d36] transition-colors shrink-0"
-                title="Datei umbenennen (F2)"
+                className={`p-1 rounded transition-colors shrink-0 ${
+                  canWriteToDisk && protectOriginals
+                    ? 'text-[#6c7684] hover:text-emerald-300 hover:bg-[#242c2a]'
+                    : 'text-[#838d9b] hover:text-[#7cc4f0] hover:bg-[#272d36]'
+                }`}
+                title={
+                  canWriteToDisk && protectOriginals
+                    ? 'Originalschutz aktiv – Festplatten-Umbenennung gesperrt (F2 für Details)'
+                    : 'Datei umbenennen (F2)'
+                }
                 aria-label="Datei umbenennen"
               >
-                <Pencil className="w-3.5 h-3.5" />
+                {canWriteToDisk && protectOriginals ? (
+                  <Lock className="w-3.5 h-3.5" />
+                ) : (
+                  <Pencil className="w-3.5 h-3.5" />
+                )}
               </button>
               {entry.triage === 'keep' && (
                 <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-400 shrink-0">
@@ -1040,6 +1101,19 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
               <span>
                 {parsed.trackCount} {parsed.trackCount === 1 ? 'Spur' : 'Spuren'}
               </span>
+              {parsed.performance.channels.length > 0 && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span
+                    className="text-[#9eb7cf]"
+                    title={`Aktive MIDI-Kanäle: ${parsed.performance.channels
+                      .map((c) => `Ch ${c.channel + 1}${c.isDrum ? ' (Drums)' : ''}`)
+                      .join(', ')}`}
+                  >
+                    Ch {parsed.performance.channels.map((c) => c.channel + 1).join(',')}
+                  </span>
+                </>
+              )}
               {parsed.notes.length > 0 && (
                 <>
                   <span aria-hidden="true">·</span>
@@ -1069,6 +1143,20 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
               )}
               <span aria-hidden="true">·</span>
               <span>{formatBytes(entry.sizeBytes)}</span>
+              {entry.sha256 && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <button
+                    type="button"
+                    onClick={() => handleCopySha256(entry.sha256!)}
+                    className="inline-flex items-center gap-1 text-[#8293a6] hover:text-[#cde7fb] transition-colors"
+                    title={`SHA-256: ${entry.sha256} (Klicken zum Kopieren)`}
+                  >
+                    <Hash className="w-3 h-3" />
+                    <span>{copiedHash ? 'Hash kopiert!' : entry.sha256.slice(0, 8)}</span>
+                  </button>
+                </>
+              )}
             </div>
           ) : (
             <div className="mt-1 text-xs text-rose-400">
@@ -1201,20 +1289,24 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
           >
             Akkorde
           </button>
-          {parsed && parsed.metadata.totalCount > 0 && (
-            <button
-              type="button"
-              onClick={() => setShowMetadata((v) => !v)}
-              className={`px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
-                showMetadata
-                  ? 'bg-[#2a333f] border-[#4ea1d3]/60 text-[#d8e9f5]'
-                  : 'bg-[#22272f] border-[#313844] text-[#9aa3b0] hover:text-white'
-              }`}
-              title="Eingebettete MIDI-Metadaten (Copyright, Marker, Text-Events) ein- oder ausblenden"
-            >
-              Metadaten ({parsed.metadata.totalCount})
-            </button>
-          )}
+          {parsed &&
+            (parsed.metadata.totalCount > 0 ||
+              parsed.performance.totalCount > 0 ||
+              parsed.performance.channels.length > 0 ||
+              Boolean(entry.sha256)) && (
+              <button
+                type="button"
+                onClick={() => setShowMetadata((v) => !v)}
+                className={`px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
+                  showMetadata
+                    ? 'bg-[#2a333f] border-[#4ea1d3]/60 text-[#d8e9f5]'
+                    : 'bg-[#22272f] border-[#313844] text-[#9aa3b0] hover:text-white'
+                }`}
+                title="SHA-256 Hash, aktive MIDI-Kanäle, CC / Pitch Bend / Aftertouch / Program Changes und Metadaten ein- oder ausblenden"
+              >
+                Events &amp; Info ({parsed.metadata.totalCount + parsed.performance.totalCount})
+              </button>
+            )}
 
           <div className="flex items-center bg-[#22272f] border border-[#313844] rounded ml-1">
             <button
@@ -1329,102 +1421,208 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
         </div>
       )}
 
-      {/* MIDI Metadata Summary Bar & Expandable Inspector */}
-      {showMetadata && parsed && parsed.metadata.totalCount > 0 && (() => {
-        const md = parsed.metadata;
-        const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
-        const ticksPerBar = Math.max(1, parsed.ppqn * ts.numerator * (4 / ts.denominator));
-        const formatTickBar = (tick: number) => Math.floor(tick / ticksPerBar) + 1;
+      {/* MIDI Metadata, SHA-256 & Performance Events Summary Bar + Expandable Inspector */}
+      {showMetadata &&
+        parsed &&
+        (parsed.metadata.totalCount > 0 ||
+          parsed.performance.totalCount > 0 ||
+          parsed.performance.channels.length > 0 ||
+          Boolean(entry.sha256)) &&
+        (() => {
+          const md = parsed.metadata;
+          const perf = parsed.performance;
+          const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
+          const ticksPerBar = Math.max(1, parsed.ppqn * ts.numerator * (4 / ts.denominator));
+          const formatTickBar = (tick: number) => Math.floor(tick / ticksPerBar) + 1;
 
-        return (
-          <div className="bg-[#171c22] border-b border-[#27303a] shrink-0">
-            {/* Compact 1-line summary bar */}
-            <div className="px-4 py-1.5 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0 overflow-x-auto text-xs">
-                {md.copyright.length > 0 && (
-                  <span
-                    className="inline-flex items-center gap-1.5 text-[#c9d4e0] whitespace-nowrap shrink-0"
-                    title={md.copyright.join(' · ')}
-                  >
-                    <Copyright className="w-3.5 h-3.5 text-[#7ea8c9] shrink-0" />
-                    <span className="truncate max-w-[240px]">{md.copyright[0]}</span>
-                  </span>
-                )}
+          // Group Control Change events by controller number for compact readable summary
+          const ccGroupsMap = new Map<
+            number,
+            {
+              controller: number;
+              label: string;
+              count: number;
+              minVal: number;
+              maxVal: number;
+              firstSec: number;
+            }
+          >();
+          for (const cc of perf.controlChanges) {
+            const existing = ccGroupsMap.get(cc.controller);
+            if (!existing) {
+              ccGroupsMap.set(cc.controller, {
+                controller: cc.controller,
+                label: getMidiCcLabel(cc.controller),
+                count: 1,
+                minVal: cc.value,
+                maxVal: cc.value,
+                firstSec: cc.sec,
+              });
+            } else {
+              existing.count += 1;
+              if (cc.value < existing.minVal) existing.minVal = cc.value;
+              if (cc.value > existing.maxVal) existing.maxVal = cc.value;
+            }
+          }
+          const ccGroups = Array.from(ccGroupsMap.values()).sort((a, b) => b.count - a.count);
 
-                {md.instruments.length > 0 && (
-                  <span
-                    className="inline-flex items-center gap-1.5 text-[#9eb0c4] whitespace-nowrap shrink-0"
-                    title={`Instrumente: ${md.instruments.join(', ')}`}
-                  >
-                    <FileText className="w-3.5 h-3.5 text-[#6d94b5] shrink-0" />
-                    <span className="truncate max-w-[200px]">{md.instruments.join(', ')}</span>
-                  </span>
-                )}
+          const pbRange =
+            perf.pitchBends.length > 0
+              ? perf.pitchBends.reduce(
+                  (acc, ev) => ({
+                    min: Math.min(acc.min, ev.value),
+                    max: Math.max(acc.max, ev.value),
+                  }),
+                  { min: perf.pitchBends[0].value, max: perf.pitchBends[0].value }
+                )
+              : null;
 
-                {md.markers.length > 0 && (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <Bookmark className="w-3.5 h-3.5 text-[#e6b450] mr-0.5 shrink-0" />
-                    {md.markers.slice(0, 8).map((mk, idx) => (
-                      <button
-                        key={`${mk.tick}-${mk.text}-${idx}`}
-                        type="button"
-                        onClick={() => onSeek(mk.sec)}
-                        className="px-1.5 py-0.5 rounded bg-[#25221a] hover:bg-[#332e21] border border-[#4c4025] text-[11px] font-mono text-[#f3cf7a] transition-colors whitespace-nowrap"
-                        title={`Takt ${formatTickBar(mk.tick)} (${formatDuration(mk.sec)}) · Zu Marker springen`}
-                      >
-                        {mk.text}
-                      </button>
-                    ))}
-                    {md.markers.length > 8 && (
-                      <span className="text-[11px] font-mono text-[#8b95a3] whitespace-nowrap">
-                        +{md.markers.length - 8}
+          const maxAftertouch =
+            perf.aftertouch.length > 0
+              ? perf.aftertouch.reduce((m, ev) => Math.max(m, ev.pressure), 0)
+              : 0;
+
+          return (
+            <div className="bg-[#171c22] border-b border-[#27303a] shrink-0">
+              {/* Compact 1-line summary bar */}
+              <div className="px-4 py-1.5 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0 overflow-x-auto text-xs">
+                  {perf.channels.length > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1.5 text-[#a7c2dc] font-mono whitespace-nowrap shrink-0"
+                      title="Aktive MIDI-Kanäle (1–16)"
+                    >
+                      <Sliders className="w-3.5 h-3.5 text-[#5eb1e6] shrink-0" />
+                      <span>
+                        Kanäle: {perf.channels.map((c) => `${c.channel + 1}${c.isDrum ? 'D' : ''}`).join(', ')}
                       </span>
-                    )}
-                  </div>
-                )}
+                    </span>
+                  )}
 
-                {md.textEvents.length > 0 && md.copyright.length === 0 && md.markers.length === 0 && (
-                  <span
-                    className="inline-flex items-center gap-1.5 text-[#b5c2d1] truncate"
-                    title={md.textEvents[0].text}
-                  >
-                    <FileText className="w-3.5 h-3.5 text-[#7ea8c9] shrink-0" />
-                    <span className="truncate max-w-[360px]">{md.textEvents[0].text}</span>
-                  </span>
-                )}
+                  {perf.totalCount > 0 && (
+                    <span
+                      className="inline-flex items-center gap-2 font-mono text-[11px] text-[#9fb2c7] whitespace-nowrap shrink-0"
+                      title="Erfasste Performance-Events: CC / Pitch Bend / Aftertouch / Program Change"
+                    >
+                      <Activity className="w-3.5 h-3.5 text-[#6fd17e] shrink-0" />
+                      {perf.controlChanges.length > 0 && <span>CC {perf.controlChanges.length}</span>}
+                      {perf.pitchBends.length > 0 && <span>PB {perf.pitchBends.length}</span>}
+                      {perf.aftertouch.length > 0 && <span>AT {perf.aftertouch.length}</span>}
+                      {perf.programChanges.length > 0 && <span>PC {perf.programChanges.length}</span>}
+                    </span>
+                  )}
 
-                {md.embeddedKeySignature && (
-                  <span className="text-[11px] font-mono text-[#8495a8] whitespace-nowrap shrink-0">
-                    MIDI-Tonart: {md.embeddedKeySignature}
+                  {md.copyright.length > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1.5 text-[#c9d4e0] whitespace-nowrap shrink-0"
+                      title={md.copyright.join(' · ')}
+                    >
+                      <Copyright className="w-3.5 h-3.5 text-[#7ea8c9] shrink-0" />
+                      <span className="truncate max-w-[200px]">{md.copyright[0]}</span>
+                    </span>
+                  )}
+
+                  {md.instruments.length > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1.5 text-[#9eb0c4] whitespace-nowrap shrink-0"
+                      title={`Instrumente: ${md.instruments.join(', ')}`}
+                    >
+                      <FileText className="w-3.5 h-3.5 text-[#6d94b5] shrink-0" />
+                      <span className="truncate max-w-[180px]">{md.instruments.join(', ')}</span>
+                    </span>
+                  )}
+
+                  {md.markers.length > 0 && (
+                    <div className="flex items-center gap-1 shrink-0">
+                      <Bookmark className="w-3.5 h-3.5 text-[#e6b450] mr-0.5 shrink-0" />
+                      {md.markers.slice(0, 6).map((mk, idx) => (
+                        <button
+                          key={`${mk.tick}-${mk.text}-${idx}`}
+                          type="button"
+                          onClick={() => onSeek(mk.sec)}
+                          className="px-1.5 py-0.5 rounded bg-[#25221a] hover:bg-[#332e21] border border-[#4c4025] text-[11px] font-mono text-[#f3cf7a] transition-colors whitespace-nowrap"
+                          title={`Takt ${formatTickBar(mk.tick)} (${formatDuration(mk.sec)}) · Zu Marker springen`}
+                        >
+                          {mk.text}
+                        </button>
+                      ))}
+                      {md.markers.length > 6 && (
+                        <span className="text-[11px] font-mono text-[#8b95a3] whitespace-nowrap">
+                          +{md.markers.length - 6}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {md.textEvents.length > 0 && md.copyright.length === 0 && md.markers.length === 0 && (
+                    <span
+                      className="inline-flex items-center gap-1.5 text-[#b5c2d1] truncate"
+                      title={md.textEvents[0].text}
+                    >
+                      <FileText className="w-3.5 h-3.5 text-[#7ea8c9] shrink-0" />
+                      <span className="truncate max-w-[280px]">{md.textEvents[0].text}</span>
+                    </span>
+                  )}
+
+                  {md.embeddedKeySignature && (
+                    <span className="text-[11px] font-mono text-[#8495a8] whitespace-nowrap shrink-0">
+                      MIDI-Tonart: {md.embeddedKeySignature}
+                    </span>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setMetaExpanded((v) => !v)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium text-[#9fb2c7] hover:text-white bg-[#20262f] hover:bg-[#2a323d] border border-[#2f3845] transition-colors whitespace-nowrap shrink-0"
+                >
+                  <span>
+                    {metaExpanded
+                      ? 'Weniger'
+                      : `Details & Events (${md.totalCount + perf.totalCount})`}
                   </span>
-                )}
+                  {metaExpanded ? (
+                    <ChevronUp className="w-3 h-3" />
+                  ) : (
+                    <ChevronDown className="w-3 h-3" />
+                  )}
+                </button>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setMetaExpanded((v) => !v)}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium text-[#9fb2c7] hover:text-white bg-[#20262f] hover:bg-[#2a323d] border border-[#2f3845] transition-colors whitespace-nowrap shrink-0"
-              >
-                <span>{metaExpanded ? 'Weniger' : `Alle Metadaten (${md.totalCount})`}</span>
-                {metaExpanded ? (
-                  <ChevronUp className="w-3 h-3" />
-                ) : (
-                  <ChevronDown className="w-3 h-3" />
-                )}
-              </button>
-            </div>
-
-            {/* Expanded Metadata Inspector Panel */}
-            {metaExpanded && (
-              <div className="px-4 py-2.5 bg-[#13171c] border-t border-[#232b35] max-h-48 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2.5 text-xs">
-                {(md.copyright.length > 0 ||
-                  md.sequenceName ||
-                  md.instruments.length > 0 ||
-                  md.embeddedKeySignature) && (
-                  <div className="space-y-1.5">
+              {/* Expanded Inspector Panel */}
+              {metaExpanded && (
+                <div className="px-4 py-3 bg-[#13171c] border-t border-[#232b35] max-h-64 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-xs">
+                  {/* Column 1: SHA-256 Integrity & File Metadata */}
+                  <div className="space-y-2">
                     <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
-                      Datei- &amp; Werkangaben
+                      Datei-Integrität (SHA-256) &amp; Werkangaben
                     </div>
+                    {entry.sha256 && (
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[#798696] w-24 shrink-0">SHA-256:</span>
+                          <code className="text-[11px] font-mono text-[#a8d8f5] break-all">
+                            {entry.sha256}
+                          </code>
+                          <button
+                            type="button"
+                            onClick={() => handleCopySha256(entry.sha256!)}
+                            className="px-1.5 py-0.5 rounded bg-[#1f2630] hover:bg-[#2a3442] border border-[#313b4a] text-[10px] text-[#c7d5e5] shrink-0"
+                            title="Vollständigen SHA-256-Hash kopieren"
+                          >
+                            {copiedHash ? 'Kopiert' : 'Copy'}
+                          </button>
+                        </div>
+                        {entry.originalSha256 && entry.originalSha256 !== entry.sha256 && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-[#798696] w-24 shrink-0">Original-Hash:</span>
+                            <code className="text-[11px] font-mono text-[#7c8a9c] break-all">
+                              {entry.originalSha256}
+                            </code>
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {md.sequenceName && (
                       <div className="flex gap-2">
                         <span className="text-[#798696] w-24 shrink-0">Titel / Sequenz:</span>
@@ -1449,96 +1647,235 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                         <span className="text-[#8fc8e8] font-mono">{md.embeddedKeySignature}</span>
                       </div>
                     )}
-                  </div>
-                )}
 
-                {(md.markers.length > 0 ||
-                  md.cues.length > 0 ||
-                  md.textEvents.length > 0 ||
-                  md.lyrics.length > 0) && (
-                  <div className="space-y-1.5">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
-                      Zeitbezogene Events (Marker, Text, Cue, Lyrics)
-                    </div>
-                    <div className="space-y-1">
-                      {[...md.markers, ...md.cues, ...md.textEvents, ...md.lyrics]
-                        .sort((a, b) => a.tick - b.tick)
-                        .map((ev, idx) => {
-                          const typeLabel =
-                            ev.type === 'marker'
-                              ? 'Marker'
-                              : ev.type === 'cue'
-                              ? 'Cue'
-                              : ev.type === 'lyric'
-                              ? 'Lyric'
-                              : 'Text';
-                          const typeColor =
-                            ev.type === 'marker'
-                              ? 'text-[#f3cf7a]'
-                              : ev.type === 'cue'
-                              ? 'text-[#5fd4c2]'
-                              : 'text-[#8fc8e8]';
-
-                          return (
-                            <button
-                              key={`${ev.type}-${ev.tick}-${idx}`}
-                              type="button"
-                              onClick={() => onSeek(ev.sec)}
-                              className="w-full text-left flex items-baseline gap-2 px-1.5 py-0.5 rounded hover:bg-[#1e252e] transition-colors"
-                              title="Klicken, um zu dieser Stelle zu springen"
+                    {/* MIDI Channels & Program Changes */}
+                    {perf.channels.length > 0 && (
+                      <div className="pt-1 space-y-1">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
+                          MIDI-Kanäle &amp; Program Changes
+                        </div>
+                        <div className="space-y-1">
+                          {perf.channels.map((ch) => (
+                            <div
+                              key={ch.channel}
+                              className="flex flex-wrap items-center gap-x-2 gap-y-0.5 px-2 py-1 rounded bg-[#181e26] border border-[#252e3a]"
                             >
-                              <span className="font-mono tabular-nums text-[11px] text-[#7c8a9b] shrink-0">
-                                T{formatTickBar(ev.tick)} · {formatDuration(ev.sec)}
+                              <span className="font-mono font-semibold text-[#cde7fb]">
+                                Ch {ch.channel + 1}
+                                {ch.isDrum ? ' (Drums)' : ''}
                               </span>
-                              <span className={`font-mono text-[11px] shrink-0 w-12 ${typeColor}`}>
-                                {typeLabel}
+                              <span className="font-mono text-[11px] text-[#8b98a8]">
+                                {ch.noteCount} Noten
                               </span>
-                              <span className="text-[#d6dfe9] break-words">{ev.text}</span>
-                            </button>
-                          );
-                        })}
-                    </div>
+                              {ch.programs.length > 0 && (
+                                <span className="text-[11px] text-[#7be090]">
+                                  ·{' '}
+                                  {ch.programs
+                                    .map((p) => `#${p + 1} ${getGmProgramName(p)}`)
+                                    .join(', ')}
+                                </span>
+                              )}
+                              {(ch.ccCount > 0 || ch.pitchBendCount > 0 || ch.aftertouchCount > 0) && (
+                                <span className="font-mono text-[10px] text-[#7c8c9e]">
+                                  (
+                                  {[
+                                    ch.ccCount > 0 ? `CC ${ch.ccCount}` : null,
+                                    ch.pitchBendCount > 0 ? `PB ${ch.pitchBendCount}` : null,
+                                    ch.aftertouchCount > 0 ? `AT ${ch.aftertouchCount}` : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' · ')}
+                                  )
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            )}
+
+                  {/* Column 2: CC, Pitch Bend, Aftertouch & Time-based Events */}
+                  <div className="space-y-2.5">
+                    {(ccGroups.length > 0 ||
+                      perf.pitchBends.length > 0 ||
+                      perf.aftertouch.length > 0) && (
+                      <div className="space-y-1.5">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
+                          CC, Pitch Bend &amp; Aftertouch
+                        </div>
+                        <div className="space-y-1">
+                          {ccGroups.map((grp) => (
+                            <button
+                              key={grp.controller}
+                              type="button"
+                              onClick={() => onSeek(grp.firstSec)}
+                              className="w-full text-left flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#181e26] hover:bg-[#1e2630] border border-[#252e3a] transition-colors"
+                              title="Klicken, um zum ersten Event dieses Controllers zu springen"
+                            >
+                              <span className="text-[#d6e2ee] truncate">
+                                <span className="font-mono text-[#7cc4f0]">CC {grp.controller}</span>{' '}
+                                · {grp.label}
+                              </span>
+                              <span className="font-mono text-[11px] text-[#8d9cb0] whitespace-nowrap shrink-0">
+                                {grp.count}× · Werte {grp.minVal}–{grp.maxVal}
+                              </span>
+                            </button>
+                          ))}
+
+                          {perf.pitchBends.length > 0 && pbRange && (
+                            <button
+                              type="button"
+                              onClick={() => onSeek(perf.pitchBends[0].sec)}
+                              className="w-full text-left flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#181e26] hover:bg-[#1e2630] border border-[#252e3a] transition-colors"
+                              title="Klicken, um zum ersten Pitch-Bend-Event zu springen"
+                            >
+                              <span className="text-[#f0cf85]">Pitch Bend (14-Bit)</span>
+                              <span className="font-mono text-[11px] text-[#8d9cb0] whitespace-nowrap shrink-0">
+                                {perf.pitchBends.length}× · {pbRange.min} bis {pbRange.max}
+                              </span>
+                            </button>
+                          )}
+
+                          {perf.aftertouch.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => onSeek(perf.aftertouch[0].sec)}
+                              className="w-full text-left flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#181e26] hover:bg-[#1e2630] border border-[#252e3a] transition-colors"
+                              title="Klicken, um zum ersten Aftertouch-Event zu springen"
+                            >
+                              <span className="text-[#cfa4f5]">
+                                Aftertouch (
+                                {perf.aftertouch.some((a) => a.kind === 'poly') &&
+                                perf.aftertouch.some((a) => a.kind === 'channel')
+                                  ? 'Channel + Poly'
+                                  : perf.aftertouch.some((a) => a.kind === 'poly')
+                                  ? 'Polyphon'
+                                  : 'Channel Pressure'}
+                                )
+                              </span>
+                              <span className="font-mono text-[11px] text-[#8d9cb0] whitespace-nowrap shrink-0">
+                                {perf.aftertouch.length}× · Max {maxAftertouch}
+                              </span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {(md.markers.length > 0 ||
+                      md.cues.length > 0 ||
+                      md.textEvents.length > 0 ||
+                      md.lyrics.length > 0) && (
+                      <div className="space-y-1.5">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
+                          Zeitbezogene Events (Marker, Text, Cue, Lyrics)
+                        </div>
+                        <div className="space-y-1">
+                          {[...md.markers, ...md.cues, ...md.textEvents, ...md.lyrics]
+                            .sort((a, b) => a.tick - b.tick)
+                            .map((ev, idx) => {
+                              const typeLabel =
+                                ev.type === 'marker'
+                                  ? 'Marker'
+                                  : ev.type === 'cue'
+                                  ? 'Cue'
+                                  : ev.type === 'lyric'
+                                  ? 'Lyric'
+                                  : 'Text';
+                              const typeColor =
+                                ev.type === 'marker'
+                                  ? 'text-[#f3cf7a]'
+                                  : ev.type === 'cue'
+                                  ? 'text-[#5fd4c2]'
+                                  : 'text-[#8fc8e8]';
+
+                              return (
+                                <button
+                                  key={`${ev.type}-${ev.tick}-${idx}`}
+                                  type="button"
+                                  onClick={() => onSeek(ev.sec)}
+                                  className="w-full text-left flex items-baseline gap-2 px-1.5 py-0.5 rounded hover:bg-[#1e252e] transition-colors"
+                                  title="Klicken, um zu dieser Stelle zu springen"
+                                >
+                                  <span className="font-mono tabular-nums text-[11px] text-[#7c8a9b] shrink-0">
+                                    T{formatTickBar(ev.tick)} · {formatDuration(ev.sec)}
+                                  </span>
+                                  <span className={`font-mono text-[11px] shrink-0 w-12 ${typeColor}`}>
+                                    {typeLabel}
+                                  </span>
+                                  <span className="text-[#d6dfe9] break-words">{ev.text}</span>
+                                </button>
+                              );
+                            })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+      {/* Duplicate / Variant Comparison Strip */}
+      {duplicateInfo && duplicateInfo.peers.length > 0 && (() => {
+        const stripLabel =
+          duplicateInfo.kind === 'byte_exact'
+            ? 'Byte-identisches Duplikat (SHA-256 · 100%)'
+            : duplicateInfo.kind === 'note_exact'
+            ? 'Noten-identisches Duplikat (100% · anderer Header/Vorlauf)'
+            : `Musikalische Variante (${duplicateInfo.similarity}%)`;
+
+        const stripColor =
+          duplicateInfo.kind === 'byte_exact'
+            ? 'text-amber-300'
+            : duplicateInfo.kind === 'note_exact'
+            ? 'text-sky-300'
+            : 'text-violet-300';
+
+        return (
+          <div className="px-4 py-1.5 bg-[#1b1f27] border-b border-[#2b313a] flex flex-wrap items-center gap-2 text-xs shrink-0">
+            <span className={`inline-flex items-center gap-1.5 font-medium shrink-0 ${stripColor}`}>
+              <Copy className="w-3.5 h-3.5" />
+              Gruppe #{duplicateInfo.groupId} · {stripLabel}
+            </span>
+            <span className="text-[#6f7885]">·</span>
+            <span className="text-[11px] text-[#8d96a4]">Vergleichen mit:</span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {duplicateInfo.peers.map((peer) => {
+                const peerTag =
+                  peer.matchType === 'byte_exact'
+                    ? 'SHA'
+                    : peer.matchType === 'note_exact'
+                    ? 'Noten='
+                    : `${peer.similarity}%`;
+                const peerTagColor =
+                  peer.matchType === 'byte_exact'
+                    ? 'text-amber-300'
+                    : peer.matchType === 'note_exact'
+                    ? 'text-sky-300'
+                    : 'text-violet-300';
+
+                return (
+                  <button
+                    key={peer.id}
+                    type="button"
+                    onClick={() => onSelectEntry?.(peer.id)}
+                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#232933] hover:bg-[#2d3542] border border-[#343d4b] text-[11px] text-[#d6dfeb] transition-colors whitespace-nowrap"
+                    title={`Zu ${peer.name} springen · ${peer.reason}`}
+                  >
+                    <span className="truncate max-w-[180px]">
+                      {peer.name.replace(/\.(mid|midi)$/i, '')}
+                    </span>
+                    <span className={`font-mono text-[10px] ${peerTagColor}`}>{peerTag}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         );
       })()}
-
-      {/* Duplicate / Variant Comparison Strip */}
-      {duplicateInfo && duplicateInfo.peers.length > 0 && (
-        <div className="px-4 py-1.5 bg-[#1b1f27] border-b border-[#2b313a] flex flex-wrap items-center gap-2 text-xs shrink-0">
-          <span
-            className={`inline-flex items-center gap-1.5 font-medium shrink-0 ${
-              duplicateInfo.kind === 'exact' ? 'text-amber-300' : 'text-violet-300'
-            }`}
-          >
-            <Copy className="w-3.5 h-3.5" />
-            Gruppe #{duplicateInfo.groupId} ·{' '}
-            {duplicateInfo.kind === 'exact' ? 'Exaktes Duplikat' : 'Ähnliche Variante'} (
-            {duplicateInfo.similarity}%)
-          </span>
-          <span className="text-[#6f7885]">·</span>
-          <span className="text-[11px] text-[#8d96a4]">Vergleichen mit:</span>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {duplicateInfo.peers.map((peer) => (
-              <button
-                key={peer.id}
-                type="button"
-                onClick={() => onSelectEntry?.(peer.id)}
-                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#232933] hover:bg-[#2d3542] border border-[#343d4b] text-[11px] text-[#d6dfeb] transition-colors whitespace-nowrap"
-                title={`Zu ${peer.name} springen (${peer.similarity}% Ähnlichkeit)`}
-              >
-                <span className="truncate max-w-[180px]">
-                  {peer.name.replace(/\.(mid|midi)$/i, '')}
-                </span>
-                <span className="font-mono text-[10px] text-[#7ea8c9]">{peer.similarity}%</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Interactive Trim Control Strip */}
       {trimMode && parsed && (() => {
@@ -1703,27 +2040,63 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                         }
                       }}
                       className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#2a3846] hover:bg-[#344658] border border-[#4ea1d3]/60 text-xs font-medium text-[#dcebf7] transition-colors whitespace-nowrap"
+                      title="Speichert eine gekürzte Kopie (_trimmed.mid), ohne das Original anzutasten"
                     >
                       <Save className="w-3 h-3" />
                       Als Kopie speichern
                     </button>
-                    <button
-                      type="button"
-                      disabled={trimBusy}
-                      onClick={async () => {
-                        setTrimBusy(true);
-                        try {
-                          await onOverwriteOriginal(entry);
-                          setTrimNotice('Originaldatei auf der Festplatte überschrieben.');
-                        } finally {
-                          setTrimBusy(false);
-                        }
-                      }}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-xs font-medium text-white transition-colors whitespace-nowrap"
-                    >
-                      <Save className="w-3 h-3" />
-                      Original überschreiben
-                    </button>
+
+                    {protectOriginals ? (
+                      <span
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#1d2422] border border-emerald-800/50 text-xs text-emerald-300/90 whitespace-nowrap"
+                        title="Originalschutz ist aktiv: Das Original auf der Festplatte bleibt geschützt. Oben deaktivieren, um Überschreiben freizuschalten."
+                      >
+                        <Lock className="w-3 h-3" />
+                        Original geschützt
+                      </span>
+                    ) : confirmOverwrite ? (
+                      <div className="inline-flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={trimBusy}
+                          onClick={async () => {
+                            setTrimBusy(true);
+                            try {
+                              await onOverwriteOriginal(entry);
+                              setConfirmOverwrite(false);
+                              setTrimNotice(
+                                'Original auf Festplatte überschrieben (Backup in _Originale_Backup gespeichert).'
+                              );
+                            } finally {
+                              setTrimBusy(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-rose-700 hover:bg-rose-600 text-xs font-medium text-white transition-colors whitespace-nowrap"
+                        >
+                          <Save className="w-3 h-3" />
+                          Ja, Original überschreiben (mit Backup)
+                        </button>
+                        <button
+                          type="button"
+                          disabled={trimBusy}
+                          onClick={() => setConfirmOverwrite(false)}
+                          className="px-2 py-1 rounded bg-[#222926] hover:bg-[#2c3531] border border-[#384740] text-xs text-[#d0dcd6]"
+                        >
+                          Abbrechen
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={trimBusy}
+                        onClick={() => setConfirmOverwrite(true)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-xs font-medium text-white transition-colors whitespace-nowrap"
+                        title="Legt zuvor automatisch eine Kopie in _Originale_Backup an"
+                      >
+                        <Save className="w-3 h-3" />
+                        Original überschreiben
+                      </button>
+                    )}
                   </>
                 )}
 
@@ -2218,10 +2591,16 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
           {canWriteToDisk && onImmediateMoveToSorted && (
             <button
               type="button"
+              disabled={protectOriginals}
               onClick={() => onImmediateMoveToSorted(entry)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-rose-700/80 hover:bg-rose-600 text-white transition-colors whitespace-nowrap"
-              title="Datei sofort in den Unterordner _Aussortiert verschieben"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-rose-700/80 hover:bg-rose-600 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors whitespace-nowrap"
+              title={
+                protectOriginals
+                  ? 'Originalschutz aktiv – Verschieben auf der Festplatte gesperrt'
+                  : 'Datei sofort in den Unterordner _Aussortiert verschieben'
+              }
             >
+              {protectOriginals && <Lock className="w-3 h-3" />}
               Sofort verschieben
             </button>
           )}

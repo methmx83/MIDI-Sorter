@@ -54,7 +54,7 @@ function encodeTrack(events: RawTrackEvent[], endTick: number): Uint8Array {
       return 2;
     }
     const type = ev.status & 0xf0;
-    if (type === 0xb0 || type === 0xc0) return 3;
+    if (type === 0xb0 || type === 0xc0 || type === 0xd0 || type === 0xe0) return 3;
     if (type === 0x80 || (type === 0x90 && ev.data[1] === 0)) return 4;
     return 5;
   };
@@ -163,6 +163,7 @@ export function trimMidiBuffer(buffer: ArrayBuffer, options: TrimMidiOptions): A
     const latestPrograms = new Map<number, RawTrackEvent>();
     const latestCCs = new Map<string, RawTrackEvent>();
     const latestPitchBends = new Map<number, RawTrackEvent>();
+    const latestAftertouch = new Map<number, RawTrackEvent>();
 
     // Track notes that started before trimStart and may still be sounding at trimStart
     const preStartOpenNotes = new Map<number, { status: number; pitch: number; velocity: number }>();
@@ -263,6 +264,8 @@ export function trimMidiBuffer(buffer: ArrayBuffer, options: TrimMidiOptions): A
             }
           } else if (type === 0xe0) {
             latestPitchBends.set(ch, { tick: 0, status, data });
+          } else if (type === 0xd0) {
+            latestAftertouch.set(ch, { tick: 0, status, data });
           }
         } else if (trimEnd === null || tick <= trimEnd) {
           const shiftedTick = tick - trimStart;
@@ -296,6 +299,7 @@ export function trimMidiBuffer(buffer: ArrayBuffer, options: TrimMidiOptions): A
       ...latestPrograms.values(),
       ...latestCCs.values(),
       ...latestPitchBends.values(),
+      ...latestAftertouch.values(),
     ];
 
     // Notes that started before trimStart and were still sounding at trimStart -> start cleanly at tick 0
