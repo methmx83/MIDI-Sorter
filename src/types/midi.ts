@@ -30,12 +30,15 @@ export interface MidiNote {
 
 export interface MidiTempoEvent {
   tick: number;
+  sec: number;
   microsecondsPerBeat: number;
   bpm: number;
 }
 
 export interface MidiTimeSignature {
   tick: number;
+  sec: number;
+  bar: number;
   numerator: number;
   denominator: number;
 }
@@ -48,6 +51,8 @@ export interface MidiTrackSummary {
   hasEndOfTrack: boolean;
   wasTruncated: boolean;
 }
+
+export type KeyStatus = 'detected' | 'unknown' | 'percussion' | 'empty';
 
 export interface DetectedKey {
   tonic: number; // 0..11
@@ -145,11 +150,16 @@ export interface MidiPerformanceEvents {
 export interface ParsedMidi {
   format: number;
   ppqn: number;
+  smpteTicksPerSecond: number;
   trackCount: number;
   tracks: MidiTrackSummary[];
   notes: MidiNote[];
   tempos: MidiTempoEvent[];
   timeSignatures: MidiTimeSignature[];
+  hasExplicitTempo: boolean;
+  hasExplicitTimeSignature: boolean;
+  hasTempoChanges: boolean;
+  hasTimeSignatureChanges: boolean;
   primaryBpm: number;
   primaryTimeSignature: string;
   totalTicks: number;
@@ -165,7 +175,11 @@ export interface ParsedMidi {
   danglingNotesCount: number;
   longestGapSec: number;
   detectedKey: DetectedKey | null;
+  keyStatus: KeyStatus;
+  keyUnknownReason?: string;
   isPercussionOnly: boolean;
+  isCompleteComposition: boolean;
+  completeCompositionReason?: string;
   metadata: MidiMetadata;
   performance: MidiPerformanceEvents;
   issues: MidiIssue[];

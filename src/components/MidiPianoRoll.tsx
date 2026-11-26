@@ -42,6 +42,14 @@ import type { DuplicateMatchInfo } from '../utils/midiDuplicates';
 import { formatBytes, formatDuration, midiPitchToName } from '../utils/midiParser';
 import type { MidiChannelRouting, MidiPlaybackState } from '../utils/midiPlayer';
 import {
+  buildBarGrid,
+  nearestBarSnapTick,
+  secondsToTick,
+  tickToBarFraction,
+  tickToBarNumber,
+  tickToSeconds,
+} from '../utils/midiTimeline';
+import {
   computeBarEndTick,
   computeBarStartTick,
   type SmartTrimSuggestion,
@@ -159,7 +167,23 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   const [trimBusy, setTrimBusy] = useState<boolean>(false);
   const [trimNotice, setTrimNotice] = useState<string | null>(null);
   const [smartSuggestion, setSmartSuggestion] = useState<SmartTrimSuggestion | null>(null);
+  const [allowSmartTrimComplete, setAllowSmartTrimComplete] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('midi_sorter_allow_smart_trim_complete_v1') === 'true';
+    } catch {
+      return false;
+    }
+  });
   const suppressNextClickRef = useRef<boolean>(false);
+
+  const toggleAllowSmartTrimComplete = (next: boolean) => {
+    setAllowSmartTrimComplete(next);
+    try {
+      window.localStorage.setItem('midi_sorter_allow_smart_trim_complete_v1', String(next));
+    } catch {
+      // ignore storage errors
+    }
+  };
 
   // Inline Rename state
   const [isRenaming, setIsRenaming] = useState<boolean>(false);
@@ -256,6 +280,12 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   }, []);
 
   const parsed = entry?.parsed ?? null;
+  const smartTrimBlocked = Boolean(parsed?.isCompleteComposition && !allowSmartTrimComplete);
+
+  const barGrid = useMemo(
+    () => (parsed ? buildBarGrid(parsed.ppqn, parsed.timeSignatures, parsed.totalTicks) : []),
+    [parsed]
+  );
 
   const harmony = useMemo(() => {
     if (!parsed) return null;
@@ -342,38 +372,47 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
       }
     }
 
-    // 2. Vertical Bar / Beat Grid
-    if (parsed && parsed.totalTicks > 0) {
-      const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
-      const ticksPerBeat = parsed.ppqn * (4 / ts.denominator);
-      const ticksPerBar = ticksPerBeat * ts.numerator;
-      const totalBars = Math.max(1, Math.ceil(parsed.totalTicks / Math.max(1, ticksPerBar)));
-
+    // 2. Vertical Bar / Beat Grid (supports time signature changes)
+    if (parsed && parsed.totalTicks > 0 && barGrid.length > 0) {
       const pxPerTick = virtualWidth / parsed.totalTicks;
-      const barPx = ticksPerBar * pxPerTick;
-      const barStep = barPx < 22 ? Math.ceil(22 / Math.max(1, barPx)) : 1;
+      const avgBarPx = (parsed.totalTicks / barGrid.length) * pxPerTick;
+      const barStep = avgBarPx < 22 ? Math.ceil(22 / Math.max(1, avgBarPx)) : 1;
 
-      for (let b = 0; b <= totalBars; b++) {
-        const tick = b * ticksPerBar;
-        const x = PIANO_GUTTER_WIDTH + tick * pxPerTick - clampedScrollX;
-        if (x < PIANO_GUTTER_WIDTH - 2 || x > size.width + 2) continue;
+      for (let i = 0; i < barGrid.length; i++) {
+        const bar = barGrid[i];
+        const x = PIANO_GUTTER_WIDTH + bar.startTick * pxPerTick - clampedScrollX;
+        const barPx = (bar.endTick - bar.startTick) * pxPerTick;
 
-        const isMajor = b % barStep === 0;
-        if (isMajor) {
-          ctx.fillStyle = b % 4 === 0 ? '#2b363f' : '#202930';
-          ctx.fillRect(Math.round(x), plotTop, 1, plotHeight + VELOCITY_HEIGHT);
+        if (x >= PIANO_GUTTER_WIDTH - 2 && x <= size.width + 2) {
+          const isMajor = i % barStep === 0 || bar.isTimeSigChange;
+          if (isMajor) {
+            ctx.fillStyle = bar.isTimeSigChange
+              ? '#3d5870'
+              : i % 4 === 0
+              ? '#2b363f'
+              : '#202930';
+            ctx.fillRect(Math.round(x), plotTop, 1, plotHeight + VELOCITY_HEIGHT);
+          }
         }
 
         // Beat lines when zoomed in enough
-        if (barPx > 56 && b < totalBars) {
+        if (barPx > 56) {
           ctx.fillStyle = '#192127';
-          for (let beatIdx = 1; beatIdx < ts.numerator; beatIdx++) {
-            const bx = x + beatIdx * ticksPerBeat * pxPerTick;
+          for (let beatIdx = 1; beatIdx < bar.numerator; beatIdx++) {
+            const beatTick = bar.startTick + beatIdx * bar.ticksPerBeat;
+            if (beatTick >= bar.endTick - 1) break;
+            const bx = PIANO_GUTTER_WIDTH + beatTick * pxPerTick - clampedScrollX;
             if (bx >= PIANO_GUTTER_WIDTH && bx <= size.width) {
               ctx.fillRect(Math.round(bx), plotTop, 1, plotHeight);
             }
           }
         }
+      }
+
+      const endX = PIANO_GUTTER_WIDTH + barGrid[barGrid.length - 1].endTick * pxPerTick - clampedScrollX;
+      if (endX >= PIANO_GUTTER_WIDTH - 2 && endX <= size.width + 2) {
+        ctx.fillStyle = '#202930';
+        ctx.fillRect(Math.round(endX), plotTop, 1, plotHeight + VELOCITY_HEIGHT);
       }
 
       // 3. Trailing empty space hint if notes end far before totalTicks
@@ -463,26 +502,77 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
     ctx.fillStyle = '#2c343d';
     ctx.fillRect(0, RULER_HEIGHT - 1, size.width, 1);
 
-    if (parsed && parsed.totalTicks > 0) {
-      const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
-      const ticksPerBar = parsed.ppqn * ts.numerator * (4 / ts.denominator);
-      const totalBars = Math.max(1, Math.ceil(parsed.totalTicks / Math.max(1, ticksPerBar)));
+    if (parsed && parsed.totalTicks > 0 && barGrid.length > 0) {
       const pxPerTick = virtualWidth / parsed.totalTicks;
-      const barPx = ticksPerBar * pxPerTick;
-      const labelStep = barPx < 36 ? Math.ceil(36 / Math.max(1, barPx)) : 1;
+      const avgBarPx = (parsed.totalTicks / barGrid.length) * pxPerTick;
+      const labelStep = avgBarPx < 36 ? Math.ceil(36 / Math.max(1, avgBarPx)) : 1;
 
       ctx.font = '500 10px "JetBrains Mono", monospace';
       ctx.textBaseline = 'middle';
 
-      for (let b = 0; b < totalBars; b++) {
-        if (b % labelStep !== 0) continue;
-        const x = PIANO_GUTTER_WIDTH + b * ticksPerBar * pxPerTick - clampedScrollX;
+      let lastLabelX = -100;
+      for (let i = 0; i < barGrid.length; i++) {
+        const bar = barGrid[i];
+        const x = PIANO_GUTTER_WIDTH + bar.startTick * pxPerTick - clampedScrollX;
         if (x < PIANO_GUTTER_WIDTH - 24 || x > size.width) continue;
 
-        ctx.fillStyle = '#38434e';
+        const shouldDraw = i % labelStep === 0 || bar.isTimeSigChange;
+        if (!shouldDraw || x - lastLabelX < 24) continue;
+        lastLabelX = x;
+
+        ctx.fillStyle = bar.isTimeSigChange ? '#5eb1e6' : '#38434e';
         ctx.fillRect(Math.round(x), RULER_HEIGHT - 6, 1, 5);
-        ctx.fillStyle = '#8b95a2';
-        ctx.fillText(`${b + 1}`, Math.round(x) + 4, RULER_HEIGHT / 2);
+        ctx.fillStyle = bar.isTimeSigChange ? '#9dd6fa' : '#8b95a2';
+        ctx.fillText(
+          bar.isTimeSigChange ? `${bar.barNumber} (${bar.numerator}/${bar.denominator})` : `${bar.barNumber}`,
+          Math.round(x) + 4,
+          RULER_HEIGHT / 2
+        );
+      }
+
+      // 6a-pre. Compact Tempo & Time-Signature change tags on the ruler
+      if (parsed.hasTempoChanges || parsed.hasTimeSignatureChanges) {
+        const changeTags: Array<{ tick: number; text: string; color: string; bg: string }> = [];
+        for (const t of parsed.tempos) {
+          if (t.tick > 0) {
+            changeTags.push({
+              tick: t.tick,
+              text: `♩=${Math.round(t.bpm)}`,
+              color: '#5eb1e6',
+              bg: 'rgba(94, 177, 230, 0.18)',
+            });
+          }
+        }
+        for (const ts of parsed.timeSignatures) {
+          if (ts.tick > 0) {
+            changeTags.push({
+              tick: ts.tick,
+              text: `${ts.numerator}/${ts.denominator}`,
+              color: '#5fd4c2',
+              bg: 'rgba(95, 212, 194, 0.18)',
+            });
+          }
+        }
+        if (changeTags.length > 0) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(PIANO_GUTTER_WIDTH, 0, plotWidth, RULER_HEIGHT - 1);
+          ctx.clip();
+          ctx.font = '600 9px "JetBrains Mono", monospace';
+          ctx.textBaseline = 'middle';
+          for (const tag of changeTags) {
+            const tx = Math.round(PIANO_GUTTER_WIDTH + tag.tick * pxPerTick - clampedScrollX);
+            if (tx < PIANO_GUTTER_WIDTH - 48 || tx > size.width) continue;
+            ctx.fillStyle = tag.color;
+            ctx.fillRect(tx, 1, 1.5, RULER_HEIGHT - 2);
+            const tw = Math.min(64, Math.ceil(ctx.measureText(tag.text).width) + 6);
+            ctx.fillStyle = tag.bg;
+            ctx.fillRect(tx + 2, 13, tw, 11);
+            ctx.fillStyle = tag.color;
+            ctx.fillText(tag.text, tx + 4, 18.5);
+          }
+          ctx.restore();
+        }
       }
 
       // 6a. Render MIDI Markers & Cue Points in Bar Ruler + subtle guide lines
@@ -551,7 +641,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
       const pxPerTick = virtualWidth / parsed.totalTicks;
       const playTick =
         parsed.totalDurationSec > 0 && (playback.isPlaying || playback.currentSec > 0)
-          ? (playback.currentSec / parsed.totalDurationSec) * parsed.totalTicks
+          ? secondsToTick(parsed, playback.currentSec)
           : -1;
 
       ctx.save();
@@ -694,9 +784,12 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
       ctx.restore();
     }
 
-    // 9. Playhead Line
+    // 9. Playhead Line (exact tick mapping even across tempo changes)
     if (parsed && parsed.totalDurationSec > 0 && (playback.isPlaying || playback.currentSec > 0)) {
-      const ratio = Math.max(0, Math.min(1, playback.currentSec / parsed.totalDurationSec));
+      const ratio =
+        parsed.totalTicks > 0
+          ? Math.max(0, Math.min(1, secondsToTick(parsed, playback.currentSec) / parsed.totalTicks))
+          : Math.max(0, Math.min(1, playback.currentSec / parsed.totalDurationSec));
       const px = PIANO_GUTTER_WIDTH + ratio * virtualWidth - clampedScrollX;
       if (px >= PIANO_GUTTER_WIDTH && px <= size.width) {
         ctx.fillStyle = '#e2e8f0';
@@ -715,6 +808,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   }, [
     size,
     parsed,
+    barGrid,
     harmony,
     pitchBounds,
     plotTop,
@@ -743,14 +837,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
     let clamped = Math.max(0, Math.min(parsed.totalTicks, Math.round(rawTick)));
 
     if (useBarSnap) {
-      const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
-      const ticksPerBar = parsed.ppqn * ts.numerator * (4 / ts.denominator);
-      if (ticksPerBar > 0) {
-        clamped = Math.min(
-          parsed.totalTicks,
-          Math.max(0, Math.round(clamped / ticksPerBar) * ticksPerBar)
-        );
-      }
+      clamped = nearestBarSnapTick(parsed, clamped);
     }
     return clamped;
   };
@@ -894,7 +981,11 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
       0,
       Math.min(1, (mx - PIANO_GUTTER_WIDTH + clampedScrollX) / virtualWidth)
     );
-    onSeek(ratio * parsed.totalDurationSec);
+    if (parsed.totalTicks > 0) {
+      onSeek(tickToSeconds(parsed, ratio * parsed.totalTicks));
+    } else {
+      onSeek(ratio * parsed.totalDurationSec);
+    }
   };
 
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
@@ -1084,19 +1175,81 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
               <span aria-hidden="true">·</span>
               <span>{formatDuration(parsed.totalDurationSec)}</span>
               <span aria-hidden="true">·</span>
-              <span
-                className={playback.isTempoOverridden ? 'text-[#7cc4f0]' : ''}
-                title={
-                  playback.isTempoOverridden
-                    ? `MIDI-Header-Tempo: ${parsed.primaryBpm} BPM · Wiedergabe: ${playback.playbackBpm} BPM`
-                    : 'Aus MIDI-Header extrahiertes Tempo'
+              {(() => {
+                if (!parsed.hasExplicitTempo) {
+                  return (
+                    <span
+                      className={playback.isTempoOverridden ? 'text-[#7cc4f0]' : 'text-amber-300/90'}
+                      title="Kein Tempo-Meta-Event (0x51) in der MIDI-Datei gefunden — Wiedergabe nutzt 120 BPM Standard"
+                    >
+                      Kein Tempo-Tag (120 BPM Std.)
+                      {playback.isTempoOverridden ? ` → ${playback.playbackBpm} BPM` : ''}
+                    </span>
+                  );
                 }
-              >
-                {parsed.primaryBpm} BPM
-                {playback.isTempoOverridden ? ` → ${playback.playbackBpm} BPM` : ''}
-              </span>
+                if (parsed.hasTempoChanges) {
+                  const bpms = parsed.tempos.map((t) => Math.round(t.bpm));
+                  const minBpm = Math.min(...bpms);
+                  const maxBpm = Math.max(...bpms);
+                  const tempoSummary = parsed.tempos
+                    .map((t) => `T${tickToBarNumber(barGrid, t.tick)}: ${Math.round(t.bpm)} BPM`)
+                    .join(' · ');
+                  return (
+                    <span
+                      className={playback.isTempoOverridden ? 'text-[#7cc4f0]' : 'text-[#9bd3ff]'}
+                      title={`Tempowechsel (${parsed.tempos.length}×): ${tempoSummary}`}
+                    >
+                      {minBpm === maxBpm ? `${minBpm} BPM` : `${minBpm}–${maxBpm} BPM`} ({parsed.tempos.length}×)
+                      {playback.isTempoOverridden ? ` · ~${playback.playbackBpm}` : ''}
+                    </span>
+                  );
+                }
+                return (
+                  <span
+                    className={playback.isTempoOverridden ? 'text-[#7cc4f0]' : ''}
+                    title={
+                      playback.isTempoOverridden
+                        ? `MIDI-Header-Tempo: ${parsed.primaryBpm} BPM · Wiedergabe: ${playback.playbackBpm} BPM`
+                        : 'Aus MIDI-Header extrahiertes Tempo'
+                    }
+                  >
+                    {parsed.primaryBpm} BPM
+                    {playback.isTempoOverridden ? ` → ${playback.playbackBpm} BPM` : ''}
+                  </span>
+                );
+              })()}
               <span aria-hidden="true">·</span>
-              <span>{parsed.primaryTimeSignature}</span>
+              {(() => {
+                if (!parsed.hasExplicitTimeSignature) {
+                  return (
+                    <span
+                      className="text-[#8b95a3]"
+                      title="Keine Taktart-Angabe (0x58) im MIDI-Header — Standard 4/4 verwendet"
+                    >
+                      {parsed.primaryTimeSignature} (Std.)
+                    </span>
+                  );
+                }
+                if (parsed.hasTimeSignatureChanges) {
+                  const tsSummary = parsed.timeSignatures
+                    .map((ts) => `T${ts.bar}: ${ts.numerator}/${ts.denominator}`)
+                    .join(' → ');
+                  const preview = parsed.timeSignatures
+                    .slice(0, 3)
+                    .map((ts) => `${ts.numerator}/${ts.denominator}`)
+                    .join('→');
+                  return (
+                    <span
+                      className="text-[#7fd9cb]"
+                      title={`Taktartwechsel (${parsed.timeSignatures.length}×): ${tsSummary}`}
+                    >
+                      {preview}
+                      {parsed.timeSignatures.length > 3 ? '…' : ''} ({parsed.timeSignatures.length}×)
+                    </span>
+                  );
+                }
+                return <span>{parsed.primaryTimeSignature}</span>;
+              })()}
               <span aria-hidden="true">·</span>
               <span>
                 {parsed.trackCount} {parsed.trackCount === 1 ? 'Spur' : 'Spuren'}
@@ -1128,7 +1281,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                   <span className="text-[#8fc8e8]">Drums / Percussion</span>
                 </>
               )}
-              {harmony?.key && (
+              {harmony?.key ? (
                 <>
                   <span aria-hidden="true">·</span>
                   <span
@@ -1140,7 +1293,17 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                     Tonart: {harmony.key.label} ({harmony.key.confidence}%)
                   </span>
                 </>
-              )}
+              ) : !harmony?.isPercussionOnly && harmony?.keyStatus === 'unknown' ? (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span
+                    className="text-[#8b95a3]"
+                    title={harmony.keyUnknownReason || 'Tonart nicht eindeutig bestimmbar'}
+                  >
+                    Tonart: Unbekannt
+                  </span>
+                </>
+              ) : null}
               <span aria-hidden="true">·</span>
               <span>{formatBytes(entry.sizeBytes)}</span>
               {entry.sha256 && (
@@ -1170,7 +1333,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
           {parsed && parsed.notes.length > 0 && parsed.firstNoteTick > 0 && (
             <button
               type="button"
-              disabled={trimBusy}
+              disabled={trimBusy || smartTrimBlocked}
               onClick={async () => {
                 setTrimBusy(true);
                 try {
@@ -1183,8 +1346,12 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                   setTrimBusy(false);
                 }
               }}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border bg-[#233340] border-[#4ea1d3]/70 text-[#d8ecfa] hover:bg-[#2b4050] transition-colors whitespace-nowrap"
-              title={`Schneidet die Stille vor der 1. Note ab (${parsed.firstNoteSec.toFixed(1)} s / ${parsed.leadingBars} Takte)`}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border bg-[#233340] border-[#4ea1d3]/70 text-[#d8ecfa] hover:bg-[#2b4050] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+              title={
+                smartTrimBlocked
+                  ? `Bei vollständigen Kompositionen standardmäßig deaktiviert (${parsed.completeCompositionReason || 'vollständiges Stück'}). Im „Trimmen“-Menü bei Bedarf aktivierbar.`
+                  : `Schneidet die Stille vor der 1. Note ab (${parsed.firstNoteSec.toFixed(1)} s / ${parsed.leadingBars} Takte)`
+              }
             >
               <Scissors className="w-3.5 h-3.5 text-[#5eb1e6]" />
               Auf 1. Note kürzen
@@ -1194,10 +1361,14 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
           {parsed && parsed.notes.length > 0 && (
             <button
               type="button"
-              disabled={trimBusy}
+              disabled={trimBusy || smartTrimBlocked}
               onClick={runSmartTrimSilence}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border bg-[#233340] border-[#4ea1d3]/70 text-[#d8ecfa] hover:bg-[#2b4050] disabled:opacity-40 transition-colors whitespace-nowrap"
-              title="Analysiert die MIDI-Datei automatisch auf führende Stille und schlägt den optimalen Schnittpunkt vor"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border bg-[#233340] border-[#4ea1d3]/70 text-[#d8ecfa] hover:bg-[#2b4050] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+              title={
+                smartTrimBlocked
+                  ? `Bei vollständigen Kompositionen standardmäßig deaktiviert (${parsed.completeCompositionReason || 'vollständiges Stück'}). Im „Trimmen“-Menü bei Bedarf aktivierbar.`
+                  : 'Analysiert die MIDI-Datei automatisch auf führende Stille und schlägt den optimalen Schnittpunkt vor'
+              }
             >
               <Wand2 className="w-3.5 h-3.5 text-[#5eb1e6]" />
               Smart Trim Silence
@@ -1293,6 +1464,10 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
             (parsed.metadata.totalCount > 0 ||
               parsed.performance.totalCount > 0 ||
               parsed.performance.channels.length > 0 ||
+              parsed.hasTempoChanges ||
+              parsed.hasTimeSignatureChanges ||
+              !parsed.hasExplicitTempo ||
+              !parsed.hasExplicitTimeSignature ||
               Boolean(entry.sha256)) && (
               <button
                 type="button"
@@ -1302,7 +1477,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                     ? 'bg-[#2a333f] border-[#4ea1d3]/60 text-[#d8e9f5]'
                     : 'bg-[#22272f] border-[#313844] text-[#9aa3b0] hover:text-white'
                 }`}
-                title="SHA-256 Hash, aktive MIDI-Kanäle, CC / Pitch Bend / Aftertouch / Program Changes und Metadaten ein- oder ausblenden"
+                title="SHA-256 Hash, Tempo-/Taktverlauf, MIDI-Kanäle, CC / Pitch Bend / Aftertouch / Program Changes und Metadaten ein- oder ausblenden"
               >
                 Events &amp; Info ({parsed.metadata.totalCount + parsed.performance.totalCount})
               </button>
@@ -1348,29 +1523,39 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
       </div>
 
       {/* Interactive Harmony / Chord Progression Strip */}
-      {showChords && parsed && harmony && (harmony.key || harmony.chords.length > 0) && (
+      {showChords &&
+        parsed &&
+        harmony &&
+        (harmony.key || harmony.keyStatus === 'unknown' || harmony.chords.length > 0) && (
         <div className="px-4 py-1.5 bg-[#181d23] border-b border-[#27303a] flex items-center gap-2.5 overflow-x-auto shrink-0">
           <div className="flex items-center gap-1.5 text-xs text-[#9fb2c7] shrink-0">
             <Music2 className="w-3.5 h-3.5 text-[#5eb1e6]" />
-            {harmony.key && (
-              <span className="font-medium text-[#dce8f5] whitespace-nowrap">
-                {harmony.key.label}
-              </span>
-            )}
-            {harmony.key && (
+            {harmony.key ? (
+              <>
+                <span className="font-medium text-[#dce8f5] whitespace-nowrap">
+                  {harmony.key.label}
+                </span>
+                <span
+                  className="text-[11px] font-mono text-[#7c8c9e] whitespace-nowrap"
+                  title="Relative Paralleltonart"
+                >
+                  ({harmony.key.relativeLabel})
+                </span>
+              </>
+            ) : harmony.keyStatus === 'unknown' ? (
               <span
-                className="text-[11px] font-mono text-[#7c8c9e] whitespace-nowrap"
-                title="Relative Paralleltonart"
+                className="text-[#8b95a3] whitespace-nowrap"
+                title={harmony.keyUnknownReason || 'Tonart nicht eindeutig bestimmbar'}
               >
-                ({harmony.key.relativeLabel})
+                Tonart: Unbekannt
               </span>
-            )}
+            ) : null}
           </div>
 
           {harmony.chords.length > 0 && (() => {
             const playTick =
               parsed.totalDurationSec > 0 && (playback.isPlaying || playback.currentSec > 0)
-                ? (playback.currentSec / parsed.totalDurationSec) * parsed.totalTicks
+                ? secondsToTick(parsed, playback.currentSec)
                 : -1;
 
             return (
@@ -1388,7 +1573,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                           type="button"
                           onClick={() => {
                             if (parsed.totalTicks > 0 && parsed.totalDurationSec > 0) {
-                              onSeek((ch.startTick / parsed.totalTicks) * parsed.totalDurationSec);
+                              onSeek(tickToSeconds(parsed, ch.startTick));
                             }
                           }}
                           className={`px-1.5 py-0.5 rounded border text-[11px] font-mono font-semibold transition-colors whitespace-nowrap shrink-0 ${
@@ -1415,7 +1600,9 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
 
           {harmony.chords.length === 0 && !harmony.isPercussionOnly && (
             <span className="text-[11px] text-[#7c8c9e] whitespace-nowrap">
-              Einzelmelodie / zu wenig gleichzeitige Harmonien für Akkorderkennung
+              {harmony.keyStatus === 'unknown' && harmony.keyUnknownReason
+                ? harmony.keyUnknownReason
+                : 'Einzelmelodie / zu wenig gleichzeitige Harmonien für Akkorderkennung'}
             </span>
           )}
         </div>
@@ -1427,13 +1614,15 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
         (parsed.metadata.totalCount > 0 ||
           parsed.performance.totalCount > 0 ||
           parsed.performance.channels.length > 0 ||
+          parsed.hasTempoChanges ||
+          parsed.hasTimeSignatureChanges ||
+          !parsed.hasExplicitTempo ||
+          !parsed.hasExplicitTimeSignature ||
           Boolean(entry.sha256)) &&
         (() => {
           const md = parsed.metadata;
           const perf = parsed.performance;
-          const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
-          const ticksPerBar = Math.max(1, parsed.ppqn * ts.numerator * (4 / ts.denominator));
-          const formatTickBar = (tick: number) => Math.floor(tick / ticksPerBar) + 1;
+          const formatTickBar = (tick: number) => tickToBarNumber(barGrid, tick);
 
           // Group Control Change events by controller number for compact readable summary
           const ccGroupsMap = new Map<
@@ -1647,6 +1836,59 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                         <span className="text-[#8fc8e8] font-mono">{md.embeddedKeySignature}</span>
                       </div>
                     )}
+
+                    {/* Tempo & Time-Signature Timeline */}
+                    <div className="pt-1 space-y-1">
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
+                        Tempo- &amp; Taktartverlauf
+                      </div>
+                      <div className="space-y-1">
+                        {!parsed.hasExplicitTempo ? (
+                          <div className="px-2 py-1 rounded bg-[#242016] border border-amber-700/40 text-[11px] text-amber-200/90">
+                            Keine Tempoangabe (0x51) im MIDI-Header — 120 BPM Standardwert aktiv
+                          </div>
+                        ) : (
+                          parsed.tempos.map((t, idx) => (
+                            <button
+                              key={`tempo-${t.tick}-${idx}`}
+                              type="button"
+                              onClick={() => onSeek(t.sec)}
+                              className="w-full text-left flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#181e26] hover:bg-[#1e2630] border border-[#252e3a] transition-colors"
+                              title="Zu diesem Tempowechsel springen"
+                            >
+                              <span className="font-mono text-[#7cc4f0]">
+                                Tempo · T{formatTickBar(t.tick)} ({formatDuration(t.sec)})
+                              </span>
+                              <span className="font-mono font-semibold text-[#dce8f5]">
+                                {Math.round(t.bpm * 10) / 10} BPM
+                              </span>
+                            </button>
+                          ))
+                        )}
+                        {!parsed.hasExplicitTimeSignature ? (
+                          <div className="px-2 py-1 rounded bg-[#181e26] border border-[#252e3a] text-[11px] text-[#8d9cb0]">
+                            Keine Taktart-Angabe (0x58) im MIDI-Header — 4/4 Standard aktiv
+                          </div>
+                        ) : (
+                          parsed.timeSignatures.map((ts, idx) => (
+                            <button
+                              key={`ts-${ts.tick}-${idx}`}
+                              type="button"
+                              onClick={() => onSeek(ts.sec)}
+                              className="w-full text-left flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#181e26] hover:bg-[#1e2630] border border-[#252e3a] transition-colors"
+                              title="Zu diesem Taktartwechsel springen"
+                            >
+                              <span className="font-mono text-[#5fd4c2]">
+                                Taktart · T{ts.bar} ({formatDuration(ts.sec)})
+                              </span>
+                              <span className="font-mono font-semibold text-[#dce8f5]">
+                                {ts.numerator}/{ts.denominator}
+                              </span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </div>
 
                     {/* MIDI Channels & Program Changes */}
                     {perf.channels.length > 0 && (
@@ -1879,11 +2121,9 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
 
       {/* Interactive Trim Control Strip */}
       {trimMode && parsed && (() => {
-        const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
-        const ticksPerBar = Math.max(1, parsed.ppqn * ts.numerator * (4 / ts.denominator));
-        const startBar = (trimStartTick / ticksPerBar + 1).toFixed(1).replace('.0', '');
+        const startBar = tickToBarFraction(barGrid, trimStartTick).toFixed(1).replace('.0', '');
         const endTickVal = trimEndTick ?? parsed.totalTicks;
-        const endBar = (endTickVal / ticksPerBar + 1).toFixed(1).replace('.0', '');
+        const endBar = tickToBarFraction(barGrid, endTickVal).toFixed(1).replace('.0', '');
 
         return (
           <div className="px-4 py-2 bg-[#1a222b] border-b border-[#2e3b49] space-y-1.5 shrink-0">
@@ -1891,10 +2131,14 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  disabled={trimBusy}
+                  disabled={trimBusy || smartTrimBlocked}
                   onClick={runSmartTrimSilence}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-[#253b4d] hover:bg-[#2f4b61] border border-[#5eb1e6]/70 text-[#e2f2ff] disabled:opacity-40 transition-colors whitespace-nowrap"
-                  title="MIDI-Buffer erneut analysieren und optimalen Schnittpunkt vorschlagen"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-[#253b4d] hover:bg-[#2f4b61] border border-[#5eb1e6]/70 text-[#e2f2ff] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+                  title={
+                    smartTrimBlocked
+                      ? 'Für vollständige Kompositionen standardmäßig deaktiviert (unten aktivierbar)'
+                      : 'MIDI-Buffer erneut analysieren und optimalen Schnittpunkt vorschlagen'
+                  }
                 >
                   <Wand2 className="w-3.5 h-3.5 text-[#5eb1e6]" />
                   Smart Trim Silence
@@ -1983,6 +2227,23 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                 </button>
               </div>
             </div>
+
+            {parsed.isCompleteComposition && (
+              <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded bg-[#141c24] border border-[#2c3b4a] text-xs text-[#b4c6d8]">
+                <span>
+                  Vollständige Komposition erkannt ({parsed.completeCompositionReason}) — Smart Trimming ist standardmäßig deaktiviert, um Intro, Phrasierung &amp; Ausklang zu schützen.
+                </span>
+                <label className="inline-flex items-center gap-1.5 text-xs text-[#8fd0f8] cursor-pointer select-none whitespace-nowrap">
+                  <input
+                    type="checkbox"
+                    checked={allowSmartTrimComplete}
+                    onChange={(e) => toggleAllowSmartTrimComplete(e.target.checked)}
+                    className="rounded border-[#434c59] bg-[#16191d] accent-[#5eb1e6]"
+                  />
+                  Smart Trim auch für vollständige Stücke erlauben
+                </label>
+              </div>
+            )}
 
             {smartSuggestion && (
               <div className="flex items-center gap-2 text-xs text-[#b9dcf5]">
@@ -2340,7 +2601,13 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                     ? 'bg-[#1d2b38] border-[#4ea1d3]/65'
                     : 'bg-[#22272f] border-[#313844]'
                 }`}
-                title={`MIDI-Header: ${formatBpm(headerBpm)} BPM · Klick zum Bearbeiten (±5 BPM, Shift+Klick für ±1 BPM)`}
+                title={
+                  !parsed?.hasExplicitTempo
+                    ? 'Kein Tempo-Tag im MIDI-Header (120 BPM Standard) · Klick zum Bearbeiten (±5 BPM, Shift+Klick für ±1 BPM)'
+                    : parsed?.hasTempoChanges
+                    ? `Tempowechsel aktiv (Start: ${formatBpm(headerBpm)} BPM · aktuell ${formatBpm(playback.currentBpm)} BPM) · Klick zum Skalieren`
+                    : `MIDI-Header: ${formatBpm(headerBpm)} BPM · Klick zum Bearbeiten (±5 BPM, Shift+Klick für ±1 BPM)`
+                }
               >
                 <span className="pl-2 pr-1 text-[#7ea8c9] flex items-center" aria-hidden="true">
                   <Gauge className="w-3.5 h-3.5" />
@@ -2390,6 +2657,8 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                   />
                   <span className="pr-1.5 text-[10px] font-mono text-[#7f8895] select-none">
                     BPM
+                    {!parsed?.hasExplicitTempo && !playback.isTempoOverridden ? ' Std.' : ''}
+                    {parsed?.hasTempoChanges ? ' ~' : ''}
                   </span>
                 </div>
                 <button

@@ -263,7 +263,15 @@ export const TrainingTxtModal: React.FC<TrainingTxtModalProps> = ({
 
             <div className="pt-1 flex items-center justify-between gap-2 text-[11px] text-[#7c8796]">
               <span>
-                Spuren, Abschnitte, Tonart ({draft.grundton} {draft.modus}), Taktart ({draft.taktart}) und BPM ({draft.tempoBpm}) wurden automatisch ermittelt.
+                Spuren, Abschnitte, Tonart (
+                {draft.grundton === 'unbekannt'
+                  ? 'unbekannt'
+                  : `${draft.grundton} ${draft.modus}`}
+                ), Taktart ({draft.taktart}) und BPM (
+                {draft.tempoBekannt && draft.tempoBpm !== null
+                  ? `${draft.tempoBpm}${draft.tempoWechsel.length > 1 ? ` · ${draft.tempoWechsel.length}× Wechsel` : ''}`
+                  : 'unbekannt'}
+                ) wurden automatisch ermittelt.
               </span>
               {onOpenAbbreviationProfile && (
                 <button

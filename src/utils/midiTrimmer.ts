@@ -1,4 +1,12 @@
 import type { ParsedMidi } from '../types/midi';
+import {
+  barEndTickAt,
+  barStartTickAt,
+  buildBarGrid,
+  findBarAtTick,
+  tickToBarFraction,
+  tickToSeconds,
+} from './midiTimeline';
 
 interface RawTrackEvent {
   tick: number;
@@ -354,17 +362,11 @@ export function trimMidiBuffer(buffer: ArrayBuffer, options: TrimMidiOptions): A
 }
 
 export function computeBarStartTick(parsed: ParsedMidi, tick: number): number {
-  const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
-  const ticksPerBar = parsed.ppqn * ts.numerator * (4 / ts.denominator);
-  if (ticksPerBar <= 0) return 0;
-  return Math.floor(Math.max(0, tick) / ticksPerBar) * ticksPerBar;
+  return barStartTickAt(parsed, tick);
 }
 
 export function computeBarEndTick(parsed: ParsedMidi, tick: number): number {
-  const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
-  const ticksPerBar = parsed.ppqn * ts.numerator * (4 / ts.denominator);
-  if (ticksPerBar <= 0) return tick;
-  return Math.ceil(Math.max(1, tick) / ticksPerBar) * ticksPerBar;
+  return barEndTickAt(parsed, tick);
 }
 
 export interface SmartTrimSuggestion {
@@ -376,6 +378,8 @@ export interface SmartTrimSuggestion {
   removedLeadingSec: number;
   removedLeadingBars: number;
   removedTrailingSec: number;
+  isCompleteComposition: boolean;
+  completeCompositionReason?: string;
   summary: string;
 }
 
@@ -388,8 +392,7 @@ export function analyzeSilenceTrimSuggestion(
   parsed: ParsedMidi
 ): SmartTrimSuggestion {
   const bytes = new Uint8Array(buffer);
-  const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
-  const ticksPerBar = Math.max(1, parsed.ppqn * ts.numerator * (4 / ts.denominator));
+  const barGrid = buildBarGrid(parsed.ppqn, parsed.timeSignatures, parsed.totalTicks);
 
   // Scan raw binary MTrk chunks directly for Note-On (velocity > 0) events
   const noteOnHits: Array<{ tick: number; velocity: number }> = [];
@@ -501,6 +504,8 @@ export function analyzeSilenceTrimSuggestion(
       removedLeadingSec: 0,
       removedLeadingBars: 0,
       removedTrailingSec: 0,
+      isCompleteComposition: parsed.isCompleteComposition,
+      completeCompositionReason: parsed.completeCompositionReason,
       summary: 'Keine Noten in der MIDI-Datei vorhanden.',
     };
   }
@@ -513,18 +518,22 @@ export function analyzeSilenceTrimSuggestion(
   // Check if the very first note is a quiet stray trigger (vel <= 15) followed by >= 2 empty bars
   if (noteOnHits.length >= 3 && firstHit.velocity <= 15) {
     const secondHit = noteOnHits[1];
-    if (secondHit.tick - firstHit.tick >= ticksPerBar * 2) {
+    const firstBar = findBarAtTick(barGrid, firstHit.tick);
+    const firstBarLen = Math.max(1, firstBar.endTick - firstBar.startTick);
+    if (secondHit.tick - firstHit.tick >= firstBarLen * 2) {
       onsetTick = secondHit.tick;
       skippedGhostNote = true;
     }
   }
 
-  // Smart bar-grid alignment near bar boundaries (preserves humanization/downbeat)
+  // Smart bar-grid alignment near bar boundaries (supports variable time signatures)
   let suggestedStartTick = onsetTick;
   let alignedToBar = false;
   if (onsetTick > 0) {
-    const offsetInBar = onsetTick % ticksPerBar;
-    const barStart = Math.floor(onsetTick / ticksPerBar) * ticksPerBar;
+    const onsetBar = findBarAtTick(barGrid, onsetTick);
+    const barStart = onsetBar.startTick;
+    const offsetInBar = onsetTick - barStart;
+    const distToBarEnd = onsetBar.endTick - onsetTick;
     const earlyLeadInTolerance = Math.round(parsed.ppqn / 8); // 32nd-note early pickup
     const lateHitTolerance = Math.round(parsed.ppqn / 4); // 16th-note late onset
 
@@ -534,7 +543,7 @@ export function analyzeSilenceTrimSuggestion(
     } else if (offsetInBar <= lateHitTolerance && barStart > 0) {
       suggestedStartTick = barStart;
       alignedToBar = true;
-    } else if (ticksPerBar - offsetInBar <= earlyLeadInTolerance && barStart > 0) {
+    } else if (distToBarEnd <= earlyLeadInTolerance && barStart > 0) {
       suggestedStartTick = barStart;
       alignedToBar = true;
     }
@@ -542,18 +551,24 @@ export function analyzeSilenceTrimSuggestion(
 
   // Check for empty trailing bars at the end
   const lastEndTick = Math.max(parsed.lastNoteEndTick, maxNoteEndFromScan);
+  const lastBar = findBarAtTick(barGrid, Math.max(0, lastEndTick - 1));
+  const lastBarLen = Math.max(1, lastBar.endTick - lastBar.startTick);
   const trailingTicks = Math.max(0, parsed.totalTicks - lastEndTick);
-  const hasTrailingSilence = trailingTicks >= ticksPerBar;
+  const hasTrailingSilence = trailingTicks >= lastBarLen;
   const suggestedEndTick = hasTrailingSilence
-    ? Math.min(parsed.totalTicks, Math.max(suggestedStartTick + parsed.ppqn, computeBarEndTick(parsed, lastEndTick)))
+    ? Math.min(
+        parsed.totalTicks,
+        Math.max(suggestedStartTick + parsed.ppqn, computeBarEndTick(parsed, lastEndTick))
+      )
     : null;
 
-  const secPerTick =
-    parsed.totalTicks > 0 ? parsed.totalDurationSec / parsed.totalTicks : 0;
-  const removedLeadingSec = Math.max(0, suggestedStartTick * secPerTick);
-  const removedLeadingBars = Math.round((suggestedStartTick / ticksPerBar) * 10) / 10;
+  const removedLeadingSec = Math.max(0, tickToSeconds(parsed, suggestedStartTick));
+  const removedLeadingBars =
+    Math.round(Math.max(0, tickToBarFraction(barGrid, suggestedStartTick) - 1) * 10) / 10;
   const removedTrailingSec =
-    suggestedEndTick !== null ? Math.max(0, (parsed.totalTicks - suggestedEndTick) * secPerTick) : 0;
+    suggestedEndTick !== null
+      ? Math.max(0, parsed.totalDurationSec - tickToSeconds(parsed, suggestedEndTick))
+      : 0;
 
   const hasLeadingSilence = suggestedStartTick > 0;
   const hasSilenceToTrim =
@@ -566,7 +581,9 @@ export function analyzeSilenceTrimSuggestion(
     const parts: string[] = [];
     if (hasLeadingSilence) {
       const barInfo =
-        removedLeadingBars >= 1 ? `${removedLeadingBars} Takte (${removedLeadingSec.toFixed(1)} s)` : `${removedLeadingSec.toFixed(1)} s`;
+        removedLeadingBars >= 1
+          ? `${removedLeadingBars} Takte (${removedLeadingSec.toFixed(1)} s)`
+          : `${removedLeadingSec.toFixed(1)} s`;
       parts.push(`Vorlauf ${barInfo} erkannt`);
     }
     if (skippedGhostNote) {
@@ -581,6 +598,10 @@ export function analyzeSilenceTrimSuggestion(
     summary = `Vorschlag: ${parts.join(' · ')}.`;
   }
 
+  if (parsed.isCompleteComposition) {
+    summary += ' (Hinweis: Vollständige Komposition erkannt – Smart Trimming standardmäßig deaktiviert.)';
+  }
+
   return {
     trimStartTick: suggestedStartTick,
     trimEndTick: suggestedEndTick,
@@ -590,6 +611,8 @@ export function analyzeSilenceTrimSuggestion(
     removedLeadingSec,
     removedLeadingBars,
     removedTrailingSec,
+    isCompleteComposition: parsed.isCompleteComposition,
+    completeCompositionReason: parsed.completeCompositionReason,
     summary,
   };
 }

@@ -325,13 +325,41 @@ export const FileListPane: React.FC<FileListPaneProps> = ({
                     >
                       Drums
                     </span>
+                  ) : parsed?.keyStatus === 'unknown' ? (
+                    <span
+                      className="text-[#6f7987]"
+                      title={parsed.keyUnknownReason || 'Tonart unbekannt'}
+                    >
+                      Unbekannt
+                    </span>
                   ) : (
                     <span className="text-[#565f6b]">—</span>
                   )}
                 </div>
 
                 {/* Column 3: Compact tabular note count & duration */}
-                <div className="w-[76px] shrink-0 text-[11px] font-mono tabular-nums text-[#7e8794] text-right">
+                <div
+                  className="w-[76px] shrink-0 text-[11px] font-mono tabular-nums text-[#7e8794] text-right"
+                  title={
+                    parsed
+                      ? [
+                          parsed.hasExplicitTempo
+                            ? parsed.hasTempoChanges
+                              ? `Tempowechsel (${parsed.tempos.length}×)`
+                              : `${parsed.primaryBpm} BPM`
+                            : 'Keine Tempoangabe (0x51)',
+                          parsed.hasTimeSignatureChanges
+                            ? `Taktwechsel (${parsed.timeSignatures.length}×)`
+                            : parsed.hasExplicitTimeSignature
+                            ? parsed.primaryTimeSignature
+                            : `${parsed.primaryTimeSignature} (Std.)`,
+                          parsed.isCompleteComposition ? 'Vollständige Komposition' : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')
+                      : undefined
+                  }
+                >
                   {parsed
                     ? `${parsed.notes.length}N · ${formatDuration(parsed.totalDurationSec)}`
                     : '—'}

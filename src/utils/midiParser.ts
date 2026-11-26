@@ -15,6 +15,13 @@ import type {
   MidiTrackSummary,
   ParsedMidi,
 } from '../types/midi';
+import {
+  buildBarGrid,
+  buildTempoSegments,
+  evaluateCompleteComposition,
+  tickToBarNumber,
+  tickToSecondsFromSegments,
+} from './midiTimeline';
 import { detectKeyFromNotes } from './musicTheory';
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -312,8 +319,8 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
     program: number;
   }> = [];
 
-  const tempos: MidiTempoEvent[] = [];
-  const timeSignatures: MidiTimeSignature[] = [];
+  const rawTempos: Array<{ tick: number; microsecondsPerBeat: number; bpm: number }> = [];
+  const rawTimeSignatures: Array<{ tick: number; numerator: number; denominator: number }> = [];
   const tracks: MidiTrackSummary[] = [];
   const rawMetaTexts: Array<{
     type: MidiMetaEventType;
@@ -431,7 +438,7 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
         } else if (metaType === 0x51 && metaData.length >= 3) {
           const usPerBeat = (metaData[0] << 16) | (metaData[1] << 8) | metaData[2];
           if (usPerBeat > 0) {
-            tempos.push({
+            rawTempos.push({
               tick,
               microsecondsPerBeat: usPerBeat,
               bpm: Math.round((60_000_000 / usPerBeat) * 10) / 10,
@@ -440,7 +447,7 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
         } else if (metaType === 0x58 && metaData.length >= 2) {
           const numerator = metaData[0] || 4;
           const denominator = Math.pow(2, metaData[1] || 2);
-          timeSignatures.push({ tick, numerator, denominator });
+          rawTimeSignatures.push({ tick, numerator, denominator });
         } else if (metaType === 0x59 && metaData.length >= 2 && !embeddedKeySignature) {
           embeddedKeySignature = decodeKeySignatureMeta(metaData[0], metaData[1]);
         }
@@ -591,52 +598,32 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
     truncatedTracksCount++;
   }
 
-  // Sort tempos & time signatures
-  tempos.sort((a, b) => a.tick - b.tick);
-  if (tempos.length === 0 || tempos[0].tick > 0) {
-    tempos.unshift({ tick: 0, microsecondsPerBeat: 500_000, bpm: 120 });
+  const hasExplicitTempo = rawTempos.length > 0;
+  const hasExplicitTimeSignature = rawTimeSignatures.length > 0;
+
+  // Deduplicate & sort tempos & time signatures (keep latest event if multiple share the same tick)
+  const tempoByTick = new Map<number, { tick: number; microsecondsPerBeat: number; bpm: number }>();
+  for (const t of rawTempos) {
+    tempoByTick.set(t.tick, t);
+  }
+  const normalizedTempos = Array.from(tempoByTick.values()).sort((a, b) => a.tick - b.tick);
+  if (normalizedTempos.length === 0 || normalizedTempos[0].tick > 0) {
+    normalizedTempos.unshift({ tick: 0, microsecondsPerBeat: 500_000, bpm: 120 });
   }
 
-  timeSignatures.sort((a, b) => a.tick - b.tick);
-  if (timeSignatures.length === 0) {
-    timeSignatures.push({ tick: 0, numerator: 4, denominator: 4 });
+  const tsByTick = new Map<number, { tick: number; numerator: number; denominator: number }>();
+  for (const ts of rawTimeSignatures) {
+    tsByTick.set(ts.tick, ts);
+  }
+  const normalizedTimeSigs = Array.from(tsByTick.values()).sort((a, b) => a.tick - b.tick);
+  if (normalizedTimeSigs.length === 0 || normalizedTimeSigs[0].tick > 0) {
+    normalizedTimeSigs.unshift({ tick: 0, numerator: 4, denominator: 4 });
   }
 
   // Build tempo segment table for accurate tick -> seconds conversion
-  const tempoSegments: Array<{ tick: number; sec: number; usPerBeat: number }> = [];
-  if (smpteTicksPerSecond > 0) {
-    tempoSegments.push({ tick: 0, sec: 0, usPerBeat: 500_000 });
-  } else {
-    let accSec = 0;
-    let prevTick = 0;
-    let prevUs = tempos[0].microsecondsPerBeat;
-    tempoSegments.push({ tick: 0, sec: 0, usPerBeat: prevUs });
-
-    for (let i = 1; i < tempos.length; i++) {
-      const t = tempos[i];
-      if (t.tick > prevTick) {
-        accSec += ((t.tick - prevTick) / ppqn) * (prevUs / 1_000_000);
-        prevTick = t.tick;
-      }
-      prevUs = t.microsecondsPerBeat;
-      tempoSegments.push({ tick: t.tick, sec: accSec, usPerBeat: prevUs });
-    }
-  }
-
-  const tickToSeconds = (targetTick: number): number => {
-    if (smpteTicksPerSecond > 0) {
-      return targetTick / smpteTicksPerSecond;
-    }
-    let seg = tempoSegments[0];
-    for (let i = 1; i < tempoSegments.length; i++) {
-      if (tempoSegments[i].tick <= targetTick) {
-        seg = tempoSegments[i];
-      } else {
-        break;
-      }
-    }
-    return seg.sec + ((targetTick - seg.tick) / ppqn) * (seg.usPerBeat / 1_000_000);
-  };
+  const tempoSegments = buildTempoSegments(ppqn, normalizedTempos, smpteTicksPerSecond);
+  const tickToSeconds = (targetTick: number): number =>
+    tickToSecondsFromSegments(tempoSegments, ppqn, smpteTicksPerSecond, targetTick);
 
   const notes: MidiNote[] = rawNotes
     .map((n) => {
@@ -667,15 +654,37 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
   const effectiveTotalTicks = Math.max(maxTick, maxNoteEndTick, ppqn * 4);
   const totalDurationSec = tickToSeconds(effectiveTotalTicks);
 
-  const primaryTs = timeSignatures[0];
-  const ticksPerBar = ppqn * primaryTs.numerator * (4 / primaryTs.denominator);
-  const barCount = Math.max(1, Math.ceil(effectiveTotalTicks / Math.max(1, ticksPerBar)));
+  // Build exact bar grid respecting all time signature changes
+  const barGrid = buildBarGrid(ppqn, normalizedTimeSigs, effectiveTotalTicks);
+  const barCount = Math.max(1, barGrid.length);
 
+  const tempos: MidiTempoEvent[] = normalizedTempos.map((t) => ({
+    ...t,
+    sec: tickToSeconds(t.tick),
+  }));
+
+  const timeSignatures: MidiTimeSignature[] = normalizedTimeSigs.map((ts) => ({
+    ...ts,
+    sec: tickToSeconds(ts.tick),
+    bar: tickToBarNumber(barGrid, ts.tick),
+  }));
+
+  const hasTempoChanges =
+    new Set(tempos.map((t) => Math.round(t.bpm * 10))).size > 1;
+  const hasTimeSignatureChanges =
+    new Set(timeSignatures.map((ts) => `${ts.numerator}/${ts.denominator}`)).size > 1;
+
+  const primaryTs = timeSignatures[0];
   const firstNoteTick = notes.length > 0 ? notes[0].startTick : 0;
   const firstNoteSec = notes.length > 0 ? notes[0].startSec : 0;
   const lastNoteEndTick = notes.length > 0 ? maxNoteEndTick : 0;
   const lastNoteEndSec = notes.length > 0 ? tickToSeconds(maxNoteEndTick) : 0;
-  const leadingBars = Math.floor(firstNoteTick / Math.max(1, ticksPerBar));
+  const leadingBars =
+    notes.length > 0 ? Math.max(0, tickToBarNumber(barGrid, firstNoteTick) - 1) : 0;
+  const trailingEmptyBars =
+    notes.length > 0
+      ? Math.max(0, barCount - tickToBarNumber(barGrid, Math.max(0, lastNoteEndTick - 1)))
+      : barCount;
 
   // Longest silent gap analysis (between active notes)
   let longestGapSec = 0;
@@ -901,14 +910,32 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
     totalCount: totalMetaCount,
   };
 
+  const compositionEval = evaluateCompleteComposition({
+    noteCount: notes.length,
+    barCount,
+    totalTicks: effectiveTotalTicks,
+    totalDurationSec,
+    firstNoteTick,
+    firstNoteSec,
+    lastNoteEndTick,
+    leadingBars,
+    trailingEmptyBars,
+    issues,
+  });
+
   return {
     format,
     ppqn,
+    smpteTicksPerSecond,
     trackCount: tracks.length,
     tracks,
     notes,
     tempos,
     timeSignatures,
+    hasExplicitTempo,
+    hasExplicitTimeSignature,
+    hasTempoChanges,
+    hasTimeSignatureChanges,
     primaryBpm: tempos[0].bpm,
     primaryTimeSignature: `${primaryTs.numerator}/${primaryTs.denominator}`,
     totalTicks: effectiveTotalTicks,
@@ -924,7 +951,11 @@ export function parseMidiBuffer(buffer: ArrayBuffer): ParsedMidi {
     danglingNotesCount,
     longestGapSec,
     detectedKey: keyAnalysis.primary,
+    keyStatus: keyAnalysis.status,
+    keyUnknownReason: keyAnalysis.unknownReason,
     isPercussionOnly: keyAnalysis.isPercussionOnly,
+    isCompleteComposition: compositionEval.isComplete,
+    completeCompositionReason: compositionEval.reason,
     metadata,
     performance,
     issues,
@@ -937,11 +968,16 @@ function buildInvalidMidi(detail: string): ParsedMidi {
   return {
     format: 0,
     ppqn: 480,
+    smpteTicksPerSecond: 0,
     trackCount: 0,
     tracks: [],
     notes: [],
-    tempos: [{ tick: 0, microsecondsPerBeat: 500_000, bpm: 120 }],
-    timeSignatures: [{ tick: 0, numerator: 4, denominator: 4 }],
+    tempos: [{ tick: 0, sec: 0, microsecondsPerBeat: 500_000, bpm: 120 }],
+    timeSignatures: [{ tick: 0, sec: 0, bar: 1, numerator: 4, denominator: 4 }],
+    hasExplicitTempo: false,
+    hasExplicitTimeSignature: false,
+    hasTempoChanges: false,
+    hasTimeSignatureChanges: false,
     primaryBpm: 120,
     primaryTimeSignature: '4/4',
     totalTicks: 1920,
@@ -957,7 +993,10 @@ function buildInvalidMidi(detail: string): ParsedMidi {
     danglingNotesCount: 0,
     longestGapSec: 0,
     detectedKey: null,
+    keyStatus: 'empty',
+    keyUnknownReason: 'Ungültige Datei',
     isPercussionOnly: false,
+    isCompleteComposition: false,
     metadata: createEmptyMetadata(),
     performance: createEmptyPerformance(),
     issues: [
@@ -1206,6 +1245,53 @@ export function createDemoMidiFiles(): File[] {
     lateEvents.push(...noteEvents(48 + ((b % 2) * 5), b * bar, bar - 40, 82));
   }
 
+  // 9. Tempo_Takt_Wechsel.mid (demonstrates 4/4 -> 3/4 -> 4/4 time signature + tempo changes)
+  const changeEvents: RawEventSpec[] = [
+    { tick: 0, bytes: [0xff, 0x51, 0x03, 0x08, 0xbb, 0x80] }, // ~104.9 BPM (572288 us)
+    { tick: 0, bytes: [0xff, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08] }, // 4/4
+    metaEvent(0, 0x06, 'Teil A (4/4 · 105 BPM)'),
+  ];
+  // Bars 1..4 in 4/4
+  let cursorTick = 0;
+  for (let b = 0; b < 4; b++) {
+    for (let q = 0; q < 4; q++) {
+      changeEvents.push(...noteEvents(60 + ((b + q) % 4) * 2, cursorTick + q * beat, beat * 0.8, 88));
+    }
+    changeEvents.push(...noteEvents(48, cursorTick, bar - 20, 82));
+    cursorTick += bar;
+  }
+  // Bar 5..8 in 3/4 @ 136 BPM
+  const bar34 = beat * 3;
+  changeEvents.push({ tick: cursorTick, bytes: [0xff, 0x51, 0x03, 0x06, 0xbd, 0xec] }); // ~136 BPM
+  changeEvents.push({ tick: cursorTick, bytes: [0xff, 0x58, 0x04, 0x03, 0x02, 0x18, 0x08] }); // 3/4
+  changeEvents.push(metaEvent(cursorTick, 0x06, 'Walzer-Teil (3/4 · 136 BPM)'));
+  for (let b = 0; b < 4; b++) {
+    for (let q = 0; q < 3; q++) {
+      changeEvents.push(...noteEvents(67 + ((b + q) % 3) * 2, cursorTick + q * beat, beat * 0.75, 92));
+    }
+    changeEvents.push(...noteEvents(43, cursorTick, bar34 - 20, 84));
+    cursorTick += bar34;
+  }
+  // Bar 9..12 back to 4/4 @ 96 BPM
+  changeEvents.push({ tick: cursorTick, bytes: [0xff, 0x51, 0x03, 0x09, 0x89, 0x68] }); // 96 BPM
+  changeEvents.push({ tick: cursorTick, bytes: [0xff, 0x58, 0x04, 0x04, 0x02, 0x18, 0x08] }); // 4/4
+  changeEvents.push(metaEvent(cursorTick, 0x06, 'Finale (4/4 · 96 BPM)'));
+  for (let b = 0; b < 4; b++) {
+    for (let q = 0; q < 4; q++) {
+      changeEvents.push(...noteEvents(64 + ((b + q) % 4) * 2, cursorTick + q * beat, beat * 0.85, 86));
+    }
+    changeEvents.push(...noteEvents(48, cursorTick, bar - 20, 80));
+    cursorTick += bar;
+  }
+
+  // 10. Ohne_Tempo_Atonal_Skizze.mid (missing 0x51 tempo tag + chromatic/unknown key)
+  const noTempoEvents: RawEventSpec[] = [
+    metaEvent(0, 0x01, 'Ohne Tempo-Meta-Event und ohne tonales Zentrum'),
+  ];
+  for (let i = 0; i < 12; i++) {
+    noTempoEvents.push(...noteEvents(60 + i, i * (beat / 2), beat * 0.4, 84));
+  }
+
   return [
     makeFile('ARK-Hi_Spic_Uni.mid', encodeSmfFile(ppqn, [encodeSmfTrack(spicEvents)])),
     makeFile('Ascend_Piano.mid', encodeSmfFile(ppqn, [encodeSmfTrack(pianoEvents)])),
@@ -1221,5 +1307,7 @@ export function createDemoMidiFiles(): File[] {
     ),
     makeFile('arp_mit_luecke.mid', encodeSmfFile(ppqn, [encodeSmfTrack(gapEvents)])),
     makeFile('Melodie_mit_Vorlauf.mid', encodeSmfFile(ppqn, [encodeSmfTrack(lateEvents)])),
+    makeFile('Tempo_Takt_Wechsel.mid', encodeSmfFile(ppqn, [encodeSmfTrack(changeEvents)])),
+    makeFile('Ohne_Tempo_Atonal_Skizze.mid', encodeSmfFile(ppqn, [encodeSmfTrack(noTempoEvents)])),
   ];
 }

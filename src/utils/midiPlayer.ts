@@ -1,4 +1,5 @@
 import type { MidiNote, ParsedMidi } from '../types/midi';
+import { getBpmAtSec, getTimeSigAtTick, secondsToTick } from './midiTimeline';
 
 export interface WebMidiOutputDevice {
   id: string;
@@ -17,9 +18,14 @@ export interface MidiPlaybackState {
   totalSec: number;
   activePitches: Set<number>;
   baseBpm: number;
+  currentBpm: number;
   playbackBpm: number;
   tempoRate: number;
   isTempoOverridden: boolean;
+  hasExplicitTempo: boolean;
+  hasTempoChanges: boolean;
+  currentTimeSignature: string;
+  hasTimeSignatureChanges: boolean;
   midiStatus: WebMidiStatus;
   midiError: string | null;
   midiOutputs: WebMidiOutputDevice[];
@@ -279,8 +285,16 @@ export class WebMidiPlayer {
     }
 
     const baseBpm = this.getBaseBpm();
-    const playbackBpm = this.overrideBpm ?? baseBpm;
+    const currentBpm = this.midi ? getBpmAtSec(this.midi, currentSec) : baseBpm;
     const tempoRate = this.getTempoRate();
+    const playbackBpm =
+      this.overrideBpm !== null
+        ? Math.round(currentBpm * tempoRate * 10) / 10
+        : currentBpm;
+    const currentTick = this.midi ? secondsToTick(this.midi, currentSec) : 0;
+    const activeTs = this.midi
+      ? getTimeSigAtTick(this.midi.timeSignatures, currentTick)
+      : { numerator: 4, denominator: 4 };
 
     return {
       isPlaying: this.isPlaying,
@@ -288,9 +302,14 @@ export class WebMidiPlayer {
       totalSec,
       activePitches,
       baseBpm,
+      currentBpm,
       playbackBpm,
       tempoRate,
       isTempoOverridden: this.overrideBpm !== null,
+      hasExplicitTempo: this.midi?.hasExplicitTempo ?? false,
+      hasTempoChanges: this.midi?.hasTempoChanges ?? false,
+      currentTimeSignature: `${activeTs.numerator}/${activeTs.denominator}`,
+      hasTimeSignatureChanges: this.midi?.hasTimeSignatureChanges ?? false,
       midiStatus: this.midiStatus,
       midiError: this.midiError,
       midiOutputs: this.midiOutputs,

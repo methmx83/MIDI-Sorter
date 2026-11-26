@@ -4,6 +4,7 @@ import {
   type LibraryAbbreviation,
 } from './abbreviationProfile';
 import { getGmProgramName, getMidiCcLabel } from './midiConstants';
+import { buildBarGrid, tickToBarNumber } from './midiTimeline';
 import { analyzeMidiHarmony } from './musicTheory';
 
 export interface TrainingTxtSection {
@@ -21,7 +22,10 @@ export interface TrainingTxtDraft {
   modus: string;
   sicherheit: string;
   taktart: string;
-  tempoBpm: number;
+  tempoBpm: number | null;
+  tempoBekannt: boolean;
+  tempoWechsel: Array<{ takt: number; bpm: number }>;
+  taktartWechsel: Array<{ takt: number; taktart: string }>;
   stimmung: string[];
   meineBewertung: number;
   warumMagIch: string[];
@@ -71,7 +75,7 @@ function extractRootAndMode(parsed: ParsedMidi): {
     };
   }
 
-  return { grundton: 'C', modus: 'major', sicherheit: 'unsicher' };
+  return { grundton: 'unbekannt', modus: 'unbekannt', sicherheit: 'unbekannt' };
 }
 
 function classifyTracks(
@@ -182,16 +186,15 @@ function classifyTracks(
 }
 
 function buildSections(parsed: ParsedMidi): TrainingTxtSection[] {
-  const ts = parsed.timeSignatures[0] || { numerator: 4, denominator: 4 };
-  const ticksPerBar = Math.max(1, parsed.ppqn * ts.numerator * (4 / ts.denominator));
-  const totalBars = Math.max(1, parsed.barCount);
+  const barGrid = buildBarGrid(parsed.ppqn, parsed.timeSignatures, parsed.totalTicks);
+  const totalBars = Math.max(1, barGrid.length);
 
   // Use embedded MIDI markers when available
   if (parsed.metadata.markers.length > 0) {
     const markerBars = parsed.metadata.markers
       .map((m) => ({
         name: m.text,
-        bar: Math.max(1, Math.min(totalBars, Math.floor(m.tick / ticksPerBar) + 1)),
+        bar: Math.max(1, Math.min(totalBars, tickToBarNumber(barGrid, m.tick))),
       }))
       .sort((a, b) => a.bar - b.bar);
 
@@ -216,15 +219,9 @@ function buildSections(parsed: ParsedMidi): TrainingTxtSection[] {
     return sections;
   }
 
-  // Otherwise segment automatically from bar density curve
+  // Otherwise segment automatically from bar structure
   if (totalBars <= 8) {
     return [{ name: 'Hauptteil', vonTakt: 1, bisTakt: totalBars }];
-  }
-
-  const barCounts = new Array<number>(totalBars).fill(0);
-  for (const n of parsed.notes) {
-    const b = Math.min(totalBars - 1, Math.max(0, Math.floor(n.startTick / ticksPerBar)));
-    barCounts[b]++;
   }
 
   const introEnd = Math.max(2, Math.min(12, Math.round(totalBars * 0.14)));
@@ -350,11 +347,14 @@ export function buildTrainingTxtDraft(
       status: 'unvollständig',
       hauptstil: 'unbekannt',
       substil: [],
-      grundton: 'C',
-      modus: 'major',
-      sicherheit: 'unsicher',
-      taktart: '4/4',
-      tempoBpm: 120,
+      grundton: 'unbekannt',
+      modus: 'unbekannt',
+      sicherheit: 'unbekannt',
+      taktart: 'unbekannt',
+      tempoBpm: null,
+      tempoBekannt: false,
+      tempoWechsel: [],
+      taktartWechsel: [],
       stimmung: [],
       meineBewertung: 5,
       warumMagIch: [],
@@ -475,6 +475,46 @@ export function buildTrainingTxtDraft(
     besondereMerkmale.push(`Expression / Controller: ${exprParts.join(' · ')}`);
   }
 
+  const barGrid = buildBarGrid(parsed.ppqn, parsed.timeSignatures, parsed.totalTicks);
+  const tempoWechsel = parsed.hasExplicitTempo
+    ? parsed.tempos.map((t) => ({
+        takt: tickToBarNumber(barGrid, t.tick),
+        bpm: Math.round(t.bpm),
+      }))
+    : [];
+  const taktartWechsel = parsed.hasExplicitTimeSignature
+    ? parsed.timeSignatures.map((ts) => ({
+        takt: ts.bar ?? tickToBarNumber(barGrid, ts.tick),
+        taktart: `${ts.numerator}/${ts.denominator}`,
+      }))
+    : [];
+
+  if (!parsed.hasExplicitTempo) {
+    besondereMerkmale.push('Keine Tempoangabe (0x51) im MIDI-Header vorhanden');
+  } else if (parsed.hasTempoChanges) {
+    const preview = tempoWechsel
+      .slice(0, 6)
+      .map((t) => `T${t.takt}: ${t.bpm} BPM`)
+      .join(' → ');
+    besondereMerkmale.push(
+      `Tempowechsel im Verlauf: ${preview}${tempoWechsel.length > 6 ? ' …' : ''}`
+    );
+  }
+
+  if (parsed.hasTimeSignatureChanges) {
+    const preview = taktartWechsel
+      .slice(0, 6)
+      .map((t) => `T${t.takt}: ${t.taktart}`)
+      .join(' → ');
+    besondereMerkmale.push(
+      `Taktartwechsel im Verlauf: ${preview}${taktartWechsel.length > 6 ? ' …' : ''}`
+    );
+  }
+
+  if (parsed.keyStatus === 'unknown' && parsed.keyUnknownReason) {
+    besondereMerkmale.push(`Tonart unbekannt: ${parsed.keyUnknownReason}`);
+  }
+
   const warumMagIch: string[] = [];
   if (parsed.trackCount > 1) {
     warumMagIch.push(`Mehrspuriges Arrangement (${parsed.trackCount} Spuren)`);
@@ -493,8 +533,13 @@ export function buildTrainingTxtDraft(
     grundton,
     modus,
     sicherheit,
-    taktart: parsed.primaryTimeSignature,
-    tempoBpm: Math.round(parsed.primaryBpm),
+    taktart: parsed.hasExplicitTimeSignature
+      ? parsed.primaryTimeSignature
+      : `${parsed.primaryTimeSignature} (Standard)`,
+    tempoBpm: parsed.hasExplicitTempo ? Math.round(parsed.primaryBpm) : null,
+    tempoBekannt: parsed.hasExplicitTempo,
+    tempoWechsel,
+    taktartWechsel,
     stimmung,
     meineBewertung: entry.triage === 'keep' ? 9 : parsed.hasErrors ? 3 : 7,
     warumMagIch,
@@ -543,7 +588,25 @@ export function serializeTrainingTxt(draft: TrainingTxtDraft): string {
   lines.push('');
 
   lines.push(`taktart: ${yamlStr(draft.taktart)}`);
-  lines.push(`tempo_bpm: ${draft.tempoBpm}`);
+  if (draft.taktartWechsel.length > 1) {
+    lines.push('taktart_wechsel:');
+    for (const tw of draft.taktartWechsel) {
+      lines.push(`  - takt: ${tw.takt}`);
+      lines.push(`    taktart: ${yamlStr(tw.taktart)}`);
+    }
+  }
+  if (draft.tempoBekannt && draft.tempoBpm !== null) {
+    lines.push(`tempo_bpm: ${draft.tempoBpm}`);
+  } else {
+    lines.push('tempo_bpm: "unbekannt" # Keine Tempoangabe (0x51) in MIDI');
+  }
+  if (draft.tempoWechsel.length > 1) {
+    lines.push('tempo_wechsel:');
+    for (const tw of draft.tempoWechsel) {
+      lines.push(`  - takt: ${tw.takt}`);
+      lines.push(`    bpm: ${tw.bpm}`);
+    }
+  }
   lines.push('');
 
   pushYamlList(lines, 'stimmung', draft.stimmung);
@@ -616,9 +679,13 @@ export function buildDatasetJsonlRecord(
       grundton: draft.grundton,
       modus: draft.modus,
       sicherheit: draft.sicherheit,
+      bekannt: draft.grundton !== 'unbekannt',
     },
     taktart: draft.taktart,
+    taktart_wechsel: draft.taktartWechsel,
+    tempo_vorhanden: draft.tempoBekannt,
     tempo_bpm: draft.tempoBpm,
+    tempo_wechsel: draft.tempoWechsel,
     takte: parsed?.barCount ?? 0,
     dauer_sek: parsed ? Number(parsed.totalDurationSec.toFixed(2)) : 0,
     noten_anzahl: parsed?.notes.length ?? 0,

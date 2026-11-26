@@ -1,4 +1,10 @@
-import type { DetectedKey, MidiNote, MidiTimeSignature } from '../types/midi';
+import type {
+  DetectedKey,
+  KeyStatus,
+  MidiNote,
+  MidiTimeSignature,
+} from '../types/midi';
+import { buildBarGrid } from './midiTimeline';
 export type { DetectedKey };
 
 const PITCH_CLASSES = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
@@ -51,6 +57,8 @@ export interface DetectedChord {
 
 export interface MidiHarmonyAnalysis {
   key: DetectedKey | null;
+  keyStatus: KeyStatus;
+  keyUnknownReason?: string;
   secondaryKey: string | null;
   chords: DetectedChord[];
   progressionSummary: string[];
@@ -121,24 +129,39 @@ function buildScaleSet(tonic: number, mode: 'major' | 'minor'): Set<number> {
 
 export function detectKeyFromNotes(notes: MidiNote[]): {
   primary: DetectedKey | null;
+  status: KeyStatus;
+  unknownReason?: string;
   secondaryLabel: string | null;
   isPercussionOnly: boolean;
 } {
+  if (notes.length === 0) {
+    return {
+      primary: null,
+      status: 'empty',
+      unknownReason: 'Keine Noten vorhanden',
+      secondaryLabel: null,
+      isPercussionOnly: false,
+    };
+  }
+
   const pitchedNotes = notes.filter((n) => n.channel !== 9);
   if (pitchedNotes.length === 0) {
     return {
       primary: null,
+      status: 'percussion',
       secondaryLabel: null,
-      isPercussionOnly: notes.length > 0,
+      isPercussionOnly: true,
     };
   }
 
   const pcWeights = new Array<number>(12).fill(0);
   const bassWeights = new Array<number>(12).fill(0);
+  const distinctPcs = new Set<number>();
   let totalWeight = 0;
 
   for (const n of pitchedNotes) {
     const pc = ((n.pitch % 12) + 12) % 12;
+    distinctPcs.add(pc);
     const weight = Math.max(0.05, n.durationSec) * (0.45 + n.velocity / 200);
     pcWeights[pc] += weight;
     totalWeight += weight;
@@ -147,8 +170,17 @@ export function detectKeyFromNotes(notes: MidiNote[]): {
     }
   }
 
-  if (totalWeight <= 0) {
-    return { primary: null, secondaryLabel: null, isPercussionOnly: false };
+  if (pitchedNotes.length < 4 || distinctPcs.size < 2 || totalWeight < 0.35) {
+    return {
+      primary: null,
+      status: 'unknown',
+      unknownReason:
+        distinctPcs.size < 2
+          ? 'Nur ein einzelner Ton / zu wenig Tonvielfalt'
+          : 'Zu wenige melodische Noten für eine zuverlässige Tonarterkennung',
+      secondaryLabel: null,
+      isPercussionOnly: false,
+    };
   }
 
   // Slight bass-note tonic reinforcement (helps distinguish C major vs A minor)
@@ -193,7 +225,18 @@ export function detectKeyFromNotes(notes: MidiNote[]): {
   const best = candidates[0];
   const second = candidates[1];
 
-  const confidence = Math.max(15, Math.min(99, Math.round(((best.score + 1) / 2) * 100)));
+  // If best Krumhansl-Kessler correlation is too weak, key is genuinely unknown/atonal
+  if (!best || !Number.isFinite(best.score) || best.score < 0.35) {
+    return {
+      primary: null,
+      status: 'unknown',
+      unknownReason: 'Tonart nicht eindeutig bestimmbar (atonal oder stark chromatisch)',
+      secondaryLabel: null,
+      isPercussionOnly: false,
+    };
+  }
+
+  const confidence = Math.max(25, Math.min(99, Math.round(((best.score + 1) / 2) * 100)));
   const secondaryLabel =
     second && best.score - second.score < 0.08 ? second.label : null;
 
@@ -206,6 +249,7 @@ export function detectKeyFromNotes(notes: MidiNote[]): {
       confidence,
       scalePitchClasses: buildScaleSet(best.tonic, best.mode),
     },
+    status: 'detected',
     secondaryLabel,
     isPercussionOnly: false,
   };
@@ -321,12 +365,20 @@ export function analyzeMidiHarmony(
   timeSignatures: MidiTimeSignature[],
   totalTicks: number
 ): MidiHarmonyAnalysis {
-  const { primary: key, secondaryLabel, isPercussionOnly } = detectKeyFromNotes(notes);
+  const {
+    primary: key,
+    status: keyStatus,
+    unknownReason: keyUnknownReason,
+    secondaryLabel,
+    isPercussionOnly,
+  } = detectKeyFromNotes(notes);
   const pitchedNotes = notes.filter((n) => n.channel !== 9);
 
   if (pitchedNotes.length < 2 || totalTicks <= 0) {
     return {
       key,
+      keyStatus,
+      keyUnknownReason,
       secondaryKey: secondaryLabel,
       chords: [],
       progressionSummary: [],
@@ -334,49 +386,58 @@ export function analyzeMidiHarmony(
     };
   }
 
-  const ts = timeSignatures[0] || { numerator: 4, denominator: 4 };
-  const ticksPerBeat = Math.max(1, ppqn * (4 / ts.denominator));
-  const ticksPerBar = ticksPerBeat * ts.numerator;
-  // Analyze in half-bar windows (or 2-beat windows) for responsive harmonic rhythm
-  const windowTicks = Math.max(ticksPerBeat, Math.round(ticksPerBar / 2));
+  const bars = buildBarGrid(ppqn, timeSignatures, totalTicks);
+  const firstNoteTick = pitchedNotes[0].startTick;
 
   const rawWindows: DetectedChord[] = [];
-  const startWindowTick = Math.floor(pitchedNotes[0].startTick / windowTicks) * windowTicks;
+  let avgWindowTicks = ppqn * 2;
 
-  for (let wStart = startWindowTick; wStart < totalTicks; wStart += windowTicks) {
-    const wEnd = Math.min(totalTicks, wStart + windowTicks);
-    const pcEnergy = new Array<number>(12).fill(0);
-    let lowestPitch: number | null = null;
+  for (const bar of bars) {
+    if (bar.endTick <= firstNoteTick) continue;
+    const barLen = Math.max(1, bar.endTick - bar.startTick);
+    const subdivisions = bar.numerator >= 4 && barLen >= ppqn * 2 ? 2 : 1;
+    const subTicks = Math.max(1, Math.round(barLen / subdivisions));
+    avgWindowTicks = subTicks;
 
-    for (const n of pitchedNotes) {
-      const nEnd = n.startTick + n.durationTick;
-      if (nEnd <= wStart) continue;
-      if (n.startTick >= wEnd) break;
+    for (let s = 0; s < subdivisions; s++) {
+      const wStart = bar.startTick + s * subTicks;
+      const wEnd = s === subdivisions - 1 ? bar.endTick : Math.min(bar.endTick, wStart + subTicks);
+      if (wEnd <= wStart) continue;
 
-      const overlap = Math.min(wEnd, nEnd) - Math.max(wStart, n.startTick);
-      if (overlap <= 0) continue;
+      const winLen = wEnd - wStart;
+      const pcEnergy = new Array<number>(12).fill(0);
+      let lowestPitch: number | null = null;
 
-      const pc = ((n.pitch % 12) + 12) % 12;
-      const weight = (overlap / windowTicks) * (0.5 + n.velocity / 200);
-      pcEnergy[pc] += weight;
+      for (const n of pitchedNotes) {
+        const nEnd = n.startTick + n.durationTick;
+        if (nEnd <= wStart) continue;
+        if (n.startTick >= wEnd) break;
 
-      if (lowestPitch === null || n.pitch < lowestPitch) {
-        lowestPitch = n.pitch;
+        const overlap = Math.min(wEnd, nEnd) - Math.max(wStart, n.startTick);
+        if (overlap <= 0) continue;
+
+        const pc = ((n.pitch % 12) + 12) % 12;
+        const weight = (overlap / winLen) * (0.5 + n.velocity / 200);
+        pcEnergy[pc] += weight;
+
+        if (lowestPitch === null || n.pitch < lowestPitch) {
+          lowestPitch = n.pitch;
+        }
       }
-    }
 
-    const match = matchChordWindow(pcEnergy, lowestPitch, key);
-    if (match) {
-      rawWindows.push({
-        symbol: match.symbol,
-        root: match.root,
-        bass: match.bass,
-        startTick: wStart,
-        endTick: wEnd,
-        startBar: Math.floor(wStart / ticksPerBar) + 1,
-        quality: match.quality,
-        score: match.score,
-      });
+      const match = matchChordWindow(pcEnergy, lowestPitch, key);
+      if (match) {
+        rawWindows.push({
+          symbol: match.symbol,
+          root: match.root,
+          bass: match.bass,
+          startTick: wStart,
+          endTick: wEnd,
+          startBar: bar.barNumber,
+          quality: match.quality,
+          score: match.score,
+        });
+      }
     }
   }
 
@@ -384,7 +445,7 @@ export function analyzeMidiHarmony(
   const chords: DetectedChord[] = [];
   for (const ch of rawWindows) {
     const prev = chords[chords.length - 1];
-    if (prev && prev.symbol === ch.symbol && ch.startTick <= prev.endTick + windowTicks) {
+    if (prev && prev.symbol === ch.symbol && ch.startTick <= prev.endTick + avgWindowTicks) {
       prev.endTick = ch.endTick;
       prev.score = Math.max(prev.score, ch.score);
     } else {
@@ -392,7 +453,7 @@ export function analyzeMidiHarmony(
     }
   }
 
-  // Build compact progression summary (collapse immediate repeats, cap nicely)
+  // Build compact progression summary (collapse immediate repeats)
   const progressionSummary: string[] = [];
   for (const ch of chords) {
     if (progressionSummary[progressionSummary.length - 1] !== ch.symbol) {
@@ -402,6 +463,8 @@ export function analyzeMidiHarmony(
 
   return {
     key,
+    keyStatus,
+    keyUnknownReason,
     secondaryKey: secondaryLabel,
     chords,
     progressionSummary,

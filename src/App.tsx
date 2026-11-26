@@ -349,7 +349,11 @@ export default function App() {
       if (q) {
         const keyLabel =
           e.parsed?.detectedKey?.label.toLowerCase() ??
-          (e.parsed?.isPercussionOnly ? 'drums percussion' : '');
+          (e.parsed?.isPercussionOnly
+            ? 'drums percussion'
+            : e.parsed?.keyStatus === 'unknown'
+            ? 'unbekannt unknown'
+            : '');
         const md = e.parsed?.metadata;
         const metaMatch = md
           ? md.copyright.some((c) => c.toLowerCase().includes(q)) ||
@@ -373,12 +377,19 @@ export default function App() {
                 `kanal ${ch.channel + 1}`.includes(q)
             )
           : false;
+        const timelineMatch = e.parsed
+          ? (!e.parsed.hasExplicitTempo && ('unbekannt'.includes(q) || 'kein tempo'.includes(q))) ||
+            (e.parsed.hasTempoChanges && ('tempowechsel'.includes(q) || 'tempo'.includes(q))) ||
+            (e.parsed.hasTimeSignatureChanges && ('taktwechsel'.includes(q) || 'taktart'.includes(q))) ||
+            (e.parsed.isCompleteComposition && 'vollständig'.includes(q))
+          : false;
         if (
           !e.relativePath.toLowerCase().includes(q) &&
           !keyLabel.includes(q) &&
           !metaMatch &&
           !shaMatch &&
-          !perfMatch
+          !perfMatch &&
+          !timelineMatch
         ) {
           return false;
         }
@@ -408,7 +419,8 @@ export default function App() {
         const bucket = (item: MidiFileEntry) => {
           if (item.parsed?.detectedKey) return 0;
           if (item.parsed?.isPercussionOnly) return 1;
-          return 2;
+          if (item.parsed?.keyStatus === 'unknown') return 2;
+          return 3;
         };
         const ba = bucket(a);
         const bb = bucket(b);
