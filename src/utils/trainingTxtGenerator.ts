@@ -3,6 +3,7 @@ import {
   DEFAULT_ABBREVIATIONS,
   type LibraryAbbreviation,
 } from './abbreviationProfile';
+import { serializeMetadataSidecarTxt } from './metadataSidecar';
 import { getGmProgramName, getMidiCcLabel } from './midiConstants';
 import { buildBarGrid, tickToBarNumber } from './midiTimeline';
 import { analyzeMidiHarmony } from './musicTheory';
@@ -261,45 +262,60 @@ function inferStyleAndMood(
     .join(' ')
     .toLowerCase();
 
-  let hauptstil = 'instrumental';
+  let hauptstil = 'Orchestral';
   const substil: string[] = [];
 
   if (
-    /orchestr|string|cello|viol|brass|horn|trump|timpani|choir|ark|cs_|spic|stac|marc|leg|basson/i.test(
+    /orchestr|string|cello|viol|brass|horn|trump|timpani|choir|ark|cs_|spic|stac|marc|leg|basson|taiko|dhol/i.test(
       combinedText
     )
   ) {
-    hauptstil = 'orchestral';
-    substil.push('cinematic');
-    if (modus === 'minor') substil.push('dark');
+    const hasSynthOrHybrid = /hybrid|synth|808|sub\s?bass|electronic|pulse|pulsing/i.test(
+      combinedText
+    );
+    hauptstil = hasSynthOrHybrid ? 'Hybrid Orchestral' : 'Orchestral';
+    substil.push('Cinematic');
+    if (modus === 'minor') substil.push('Dark');
     if (parsed.primaryBpm >= 115 || /spic|marc|epic|trailer|battl/i.test(combinedText)) {
-      substil.push('trailer');
+      substil.push('Trailer');
     }
+  } else if (/underground.*hip[-_\s]?hop|boom[-_\s]?bap|underground/i.test(combinedText)) {
+    hauptstil = 'Underground-Hip-Hop';
+    substil.push('Boom Bap');
+  } else if (/808|trap|drill|hihat/i.test(combinedText)) {
+    hauptstil = 'Trap';
+    if (/drill/i.test(combinedText)) substil.push('Drill');
+    if (modus === 'minor') substil.push('Dark Trap');
+  } else if (/hip[-_\s]?hop|rap|beat/i.test(combinedText)) {
+    hauptstil = 'Hip-Hop';
+    if (/old[-_\s]?school/i.test(combinedText)) substil.push('Old-School');
+  } else if (/metal|djent|e-guitar|distort/i.test(combinedText)) {
+    hauptstil = 'Metal';
+  } else if (/r&b|rnb|soul/i.test(combinedText)) {
+    hauptstil = 'R&B';
+  } else if (/pop/i.test(combinedText)) {
+    hauptstil = 'Pop';
   } else if (/piano|klavier|grand|keys/i.test(combinedText)) {
-    hauptstil = 'piano';
-    substil.push('soloklavier', modus === 'minor' ? 'melancholisch' : 'lyrisch');
-  } else if (/drum|groove|beat|bass|synth|arp|edm|electro|techno/i.test(combinedText)) {
-    hauptstil = 'electronic';
-    if (/arp/i.test(combinedText)) substil.push('arpeggio');
-    if (/bass|groove/i.test(combinedText)) substil.push('groove');
+    hauptstil = 'Orchestral';
+    substil.push('Neoclassical');
   } else {
-    substil.push('melodie');
+    hauptstil = 'Hybrid Orchestral';
   }
 
   const stimmung: string[] = [];
   if (modus === 'minor') {
     if (parsed.primaryBpm >= 112) {
-      stimmung.push('düster', 'dramatisch', 'treibend');
+      stimmung.push('Dark', 'Dramatic', 'High-Energy');
     } else {
-      stimmung.push('traurig', 'ruhig', 'nachdenklich');
+      stimmung.push('Melancholic', 'Emotional', 'Sad');
     }
   } else if (modus === 'percussion') {
-    stimmung.push('rhythmisch', 'energetisch');
+    stimmung.push('Energetic', 'hard-hitting');
   } else {
     if (parsed.primaryBpm >= 112) {
-      stimmung.push('energetisch', 'erhebend');
+      stimmung.push('Energetic', 'Heroic');
     } else {
-      stimmung.push('warm', 'lyrisch');
+      stimmung.push('Hopeful', 'Lyrical');
     }
   }
 
@@ -525,14 +541,16 @@ export function buildTrainingTxtDraft(
     warumMagIch.push('Abwechslungsreiche Harmonik');
   }
 
+  const meta = entry.datasetMeta;
+
   return {
-    titel,
-    status,
-    hauptstil,
-    substil,
-    grundton,
-    modus,
-    sicherheit,
+    titel: meta?.title || titel,
+    status: meta?.workStatus || status,
+    hauptstil: meta?.genre || hauptstil,
+    substil: meta ? meta.subgenres : substil,
+    grundton: meta?.keyOverride?.grundton || grundton,
+    modus: meta?.keyOverride?.modus || modus,
+    sicherheit: meta?.keyOverride?.sicherheit || sicherheit,
     taktart: parsed.hasExplicitTimeSignature
       ? parsed.primaryTimeSignature
       : `${parsed.primaryTimeSignature} (Standard)`,
@@ -540,13 +558,20 @@ export function buildTrainingTxtDraft(
     tempoBekannt: parsed.hasExplicitTempo,
     tempoWechsel,
     taktartWechsel,
-    stimmung,
-    meineBewertung: entry.triage === 'keep' ? 9 : parsed.hasErrors ? 3 : 7,
-    warumMagIch,
-    wichtigeSpuren,
-    abschnitte,
-    besondereMerkmale,
-    libraryAbkuerzungen,
+    stimmung: meta ? meta.moods : stimmung,
+    meineBewertung:
+      meta?.rating ?? (entry.triage === 'keep' ? 9 : parsed.hasErrors ? 3 : 7),
+    warumMagIch: meta && meta.whyILike.length > 0 ? meta.whyILike : warumMagIch,
+    wichtigeSpuren: meta ? meta.importantTracks : wichtigeSpuren,
+    abschnitte: meta && meta.sections.length > 0 ? meta.sections : abschnitte,
+    besondereMerkmale:
+      meta && meta.specialFeatures.length > 0
+        ? meta.specialFeatures
+        : besondereMerkmale,
+    libraryAbkuerzungen:
+      meta && meta.libraryAbbreviations.length > 0
+        ? meta.libraryAbbreviations
+        : libraryAbkuerzungen,
   };
 }
 
@@ -658,6 +683,8 @@ export function buildDatasetJsonlRecord(
   txtContent: string
 ): string {
   const parsed = entry.parsed;
+  const meta = entry.datasetMeta;
+  const finalTxt = meta ? serializeMetadataSidecarTxt(entry, meta) : txtContent;
   const harmony = parsed
     ? analyzeMidiHarmony(
         parsed.notes,
@@ -668,13 +695,33 @@ export function buildDatasetJsonlRecord(
     : null;
 
   return JSON.stringify({
-    titel: draft.titel,
+    composition_id: meta?.compositionId ?? null,
+    titel: meta?.title ?? draft.titel,
+    herkunft: meta?.origin ?? 'unbekannt',
+    dateityp: meta?.fileType ?? 'unbekannt',
     midi_datei: entry.relativePath,
+    metadaten_datei: meta?.sourceLink.metadataFile ?? null,
     sha256: entry.sha256 ?? null,
-    status: draft.status,
-    hauptstil: draft.hauptstil,
-    substil: draft.substil,
-    stimmung: draft.stimmung,
+    original_datei: meta?.sourceLink.originalFile ?? entry.relativePath,
+    original_sha256: meta?.sourceLink.originalSha256 ?? entry.originalSha256 ?? entry.sha256 ?? null,
+    status: meta?.workStatus ?? draft.status,
+    bearbeitungsstatus:
+      entry.triage === 'keep'
+        ? 'behalten'
+        : entry.triage === 'discard'
+        ? 'aussortieren'
+        : 'offen',
+    pruefstatus: meta?.reviewStatus ?? 'offen',
+    meine_bewertung: meta?.rating ?? draft.meineBewertung,
+    hauptstil: meta?.genre ?? draft.hauptstil,
+    substil: meta?.subgenres ?? draft.substil,
+    mehrspur_modus: Boolean(meta?.isMultiTrackMeta),
+    instrument: meta?.instrument ?? null,
+    instrumentenfamilie: meta?.instrumentFamily ?? 'unbekannt',
+    artikulation: meta?.articulation ?? null,
+    musikalische_rolle: meta?.musicalRole ?? 'unbekannt',
+    spuren_metadaten: meta?.isMultiTrackMeta ? meta.trackMetadata ?? [] : [],
+    stimmung: meta?.moods ?? draft.stimmung,
     tonart: {
       grundton: draft.grundton,
       modus: draft.modus,
@@ -702,11 +749,13 @@ export function buildDatasetJsonlRecord(
           })),
         }
       : null,
-    wichtige_spuren: draft.wichtigeSpuren,
-    abschnitte: draft.abschnitte,
+    wichtige_spuren: meta?.importantTracks ?? draft.wichtigeSpuren,
+    abschnitte: meta?.sections ?? draft.abschnitte,
     akkordfolge: harmony?.progressionSummary ?? [],
-    library_abkuerzungen: draft.libraryAbkuerzungen,
-    training_txt: txtContent,
+    library_abkuerzungen: meta?.libraryAbbreviations ?? draft.libraryAbkuerzungen,
+    quelle: meta?.sourceLink ?? null,
+    feld_herkunft: meta?.fieldProvenance ?? null,
+    training_txt: finalTxt,
   });
 }
 

@@ -1,0 +1,130 @@
+﻿- 8Dio-Jenny_Leg  ---> Choir ---> *Legato* ---> **Akzent**
+- Alto_Women_Leg  ---> Choir ---> *Legato* ---> **Gegenmelodie**
+- ARK-Brass_Cres  ---> Brass ---> *Crescendo* ---> **Akzent**
+- ARK-Brass_Stac  ---> Brass ---> *Staccato* ---> **Rhythmischer Akzent**
+- ARK-Hi_Cres2  ---> Strings ---> *Crescendo* ---> **Akzent**
+- ARK-Hi_Spic_Uni  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- ARK-Horn_Sus  ---> Brass ---> *Sustain* ---> **Gegenmelodie**
+- ARK-Low_Choir  ---> Choir ---> *Sustain* ---> **Akzent**
+- ARK-Low_Spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- ARK-Men_Marc_Long  ---> Choir ---> *Marcato* ---> **Gegenmelodie**
+- ARK-Men_Marc_Short  ---> Choir ---> *Marcato* ---> **Gegenmelodie**
+- ARK-Women_Marc_Long  ---> Choir ---> *Marcato* ---> **Gegenmelodie**
+- ARK-Women_Marc_Short  ---> Choir ---> *Marcato* ---> **Gegenmelodie**
+- Ark1_Hi_Spic_8va  ---> Strings ---> *Spiccato* ---> **Rhythmischer Akzent**
+- ARK4-Hi_Stac  ---> Strings ---> *Staccato* ---> **Ostinato**
+- ARK4-Mid_Stac  ---> Strings ---> *Staccato* ---> **Ostinato**
+- Ark_Hi_Cres  ---> Strings ---> *Crescendo* ---> **Akzent**
+- Ark_Hi_Stac  ---> Strings ---> *Staccato* ---> **Ostinato**
+- Ark_Mid_Stac  ---> Strings ---> *Staccato* ---> **Ostinato**
+- ARK_Toms  ---> Drums ---> *Hits* ---> **Rhythmus**
+- Ascend_Piano  ---> Piano ---> *Sustain* ---> **Gegenmelodie**
+- Bariton_Solo  ---> Choir ---> *Sustain* ---> **Gegenmelodie**
+- bass  ---> Bass ---> *Sustain* ---> **Low-End**
+- Basson_Stac  ---> Woodwinds ---> *Staccato* ---> **Rhythmischer Akzent**
+- Basson_Sus  ---> Woodwinds ---> *Sustain* ---> **Harmonie**
+- bass_spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- BL-Cello_Spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- BL-Ens_Spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- BL-Ens_Sus  ---> Strings ---> *Sustain* ---> **Harmonie**
+- BL-Trombone_Stac  ---> Brass ---> *Staccato* ---> **Rhythmischer Akzent**
+- BL-Trombone_Sus  ---> Brass ---> *Sustain* ---> **Harmonie**
+- BL-Trompete_Leg  ---> Brass ---> *Legato* ---> **Gegenmelodie**
+- BL-Viola_Spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- BL-Violin2_Spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- BL_ens_Flag  ---> Strings ---> *Flageolett* ---> **Harmonie**
+- BL_ens_Sus  ---> Strings ---> *Sustain* ---> **Harmonie**
+- BL_Horn_Sus  ---> Brass ---> *Sustain* ---> **Harmonie**
+- BL_Horn_Sus_Soft  ---> Brass ---> *Sustain* ---> **Gegenmelodie**
+- BL_Trombone_Stac  ---> Brass ---> *Staccato* ---> **Rhythmischer Akzent**
+- BL_Trombone_Sus  ---> Brass ---> *Sustain* ---> **Gegenmelodie**
+- BL_Trump_Cres  ---> Brass ---> *Crescendo* ---> **Akzent**
+- BL_Vio1_Flag  ---> Strings ---> *Flageolett* ---> **Harmonie**
+- BooBass  ---> Bass ---> *Sustain* ---> **Low-End**
+- Cimbassi_Sus  ---> Brass ---> *Sustain* ---> **Akzent**
+- CineHorn  ---> Brass ---> *Sustain* ---> **Melodie**
+- Clap  ---> Drums ---> *One-Shots* ---> **Rhythmus**
+- Clarinett_Leg  ---> Woodwinds ---> *Legato* ---> **Gegenmelodie**
+- Clarinett_Stac  ---> Woodwinds ---> *Staccato* ---> **Rhythmischer Akzent**
+- Cold_Piano  ---> Piano ---> *Sustain* ---> **Akzent**
+- Crash  ---> Percussions ---> *One-Shots* ---> **Akzent**
+- CS Bass Sus  ---> Strings ---> *Sustain* ---> **Low-End**
+- CSS-Violin1_Leg  ---> Strings ---> *Legato* ---> **Melodie**
+- CSS-Violin2_Leg  ---> Strings ---> *Legato* ---> **Gegenmelodie**
+- CSS_Ens_Spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- CSS_Piano  ---> Piano ---> *Sustain* ---> **Melodie**
+- CSS_Vio1_Leg  ---> Strings ---> *Legato* ---> **Melodie**
+- CSS_Vio2_Leg  ---> Strings ---> *Legato* ---> **Gegenmelodie**
+- CSS_Viola  ---> Strings ---> *Legato* ---> **Gegenmelodie**
+- CSS_Viola_Leg  ---> Strings ---> *Legato* ---> **Gegenmelodie**
+- CSS_Violin1_Leg  ---> Strings ---> *Legato* ---> **Melodie**
+- CSS_Violin2_Leg  ---> Strings ---> *Legato* ---> **Gegenmelodie**
+- CSS_Violine1  ---> Strings ---> *Legato* ---> **Melodie**
+- CSS_Violine2  ---> Strings ---> *Legato* ---> **Gegenmelodie**
+- CS_Cello_Spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- CS_Viola_Leg  ---> Strings ---> *Legato* ---> **Gegenmelodie**
+- CS_Viola_Spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- CS_Violin1_Spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- CS_Violin2_Spic  ---> Strings ---> *Spiccato* ---> **Gegenmelodie**
+- D2_ArmaKit  ---> Drums ---> *Hits* ---> **Rhythmus**
+- D2_Monster Lows  ---> Drums ---> *Hits* ---> **Low-End**
+- D2_Monster_Hi  ---> Percussions ---> *Hits* ---> **Rhythmus**
+- D2_Monster_Mids  ---> Percussions ---> *Hits* ---> **Rhythmus**
+- Dhol  ---> Percussions ---> *Hits* ---> **Rhythmus**
+- Djun  ---> Drums ---> *Hits* ---> **Rhythmus**
+- Flute_Leg  ---> Woodwinds ---> *Legato* ---> **Gegenmelodie**
+- Flute_Stac  ---> Woodwinds ---> *Staccato* ---> **Ostinato**
+- Glocke  ---> Percussions ---> *Hits* ---> **Akzent**
+- HiHat  ---> Percussions ---> *One-Shots* ---> **Rhythmus**
+- High_Cres  ---> Strings ---> *Crescendo* ---> **Akzent**
+- High_Spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- High_Spic_uni  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- High_Stac_Ark  ---> Strings ---> *Staccato* ---> **Rhythmischer Akzent**
+- High_Sus_Ark  ---> Strings ---> *Sustain* ---> **Harmonie**
+- High_Sus_Uni  ---> Strings ---> *Sustain*---> **Layer**
+- Jenny  ---> Choir---> *Legato* ---> **Akzent**
+- JoshBell  ---> Strings ---> *Legato* ---> **Melodie**
+- Josh_Bell_Violin  ---> Strings ---> *Legato* ---> **Melodie**
+- Low Boom  ---> Drums ---> *Hits* ---> **Low-End**
+- LowChoir  ---> Choir ---> *Sustain* ---> **Akzent**
+- Low_Brass  ---> Brass ---> *Sustain* ---> **Low-End**
+- Low_Brass_Cres  ---> Brass ---> *Crescendo* ---> **Akzent**
+- Low_Brass_Stac_ark  ---> Brass ---> *Staccato* ---> **Rhythmischer Akzent**
+- Low_Spic_Ark  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- Low_Sus_Ark  ---> Strings ---> *Sustain* ---> **Low-End**
+- Men_Marc_Mid  ---> Choir ---> *Marcato* ---> **Gegenmelodie**
+- Men_Marc_Short  ---> Choir ---> *Marcato* ---> **Gegenmelodie**
+- Men_Stac  ---> Choir ---> *Staccato* ---> **Gegenmelodie**
+- Mid_Stac_Ark  ---> Strings ---> *Staccato* ---> **Ostinato**
+- Nexus Arp ---> Synth ---> *Ostinato / Arp* ---> **Gegenmelodie**
+- Oboe_Leg  ---> Woodwinds ---> *Legato* ---> **Gegenmelodie**
+- Oboe_Stac  ---> Woodwinds ---> *Staccato* ---> **Rhythmischer Akzent**
+- Open Hat  ---> Percussions ---> *One-Shots* ---> **Akzent**
+- Pad ---> Synth ---> *Sustain* ---> **Harmonie**
+- piano  ---> Piano ---> *Sustain* ---> **Melodie**
+- Rim  ---> Percussions ---> *One-Shots* ---> **Rhythmus**
+- Shaker  ---> Percussions ---> *One-Shots* ---> **Akzent**
+- Snare  ---> Drums ---> *One-Shots* ---> **Rhythmus**
+- solo cello  ---> Strings ---> *Legato* ---> **Melodie**
+- solo Volin   ---> Strings ---> *Legato* ---> **Melodie**
+- Taiko  ---> Drums ---> *Hits* ---> **Rhythmus**
+- TamTam  ---> Drums ---> *Hits* ---> **Rhythmus**
+- Timp_Ark  ---> Drums ---> *Hits* ---> **Rhythmus**
+- Tina Cello   ---> Strings ---> *Legato* ---> **Melodie**
+- Toms  ---> Drums ---> *Hits* ---> **Rhythmus**
+- trombone  ---> Brass ---> *Sustain* ---> **Gegenmelodie**
+- Trumpet  ---> Brass ---> *Sustain* ---> **Gegenmelodie**
+- Vintage_D  ---> Piano ---> *Sustain* ---> **Melodie**
+- Vintage_D_Hi  ---> Piano ---> *Sustain* ---> **Melodie**
+- Vintage_D_Low  ---> Piano ---> *Sustain* ---> **Low-End**
+- Viola_Drama  ---> Strings ---> *Sustain* ---> **Gegenmelodie**
+- Viola_spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- Violin1_spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- Violin2_spic  ---> Strings ---> *Spiccato* ---> **Ostinato**
+- Violine_Drama  ---> Strings ---> *Sustain* ---> **Melodie**
+- Violin_Harm_Drama  ---> Strings ---> *Sustain* ---> **Harmonie**
+- Women_Marc_Long  ---> Choir ---> *Marcato* ---> **Gegenmelodie**
+- Women_Marc_Mid  ---> Choir ---> *Marcato* ---> **Gegenmelodie**
+- Women_Marc_Short  ---> Choir ---> *Marcato* ---> **Gegenmelodie**
+- Women_Stac  ---> Choir ---> *Staccato* ---> **Rhythmischer Akzent**
+

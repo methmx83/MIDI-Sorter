@@ -1,22 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity,
   AlertTriangle,
-  Bookmark,
   Cable,
   Check,
-  ChevronDown,
-  ChevronUp,
   Copy,
-  Copyright,
   Download,
-  FileText,
   Gauge,
-  Hash,
   Lock,
   Maximize2,
   Minus,
-  Music2,
+  Music,
   Pause,
   Pencil,
   Play,
@@ -26,8 +19,9 @@ import {
   Save,
   Scissors,
   ShieldCheck,
-  Sliders,
+  Sparkles,
   Trash2,
+  Upload,
   Volume2,
   VolumeX,
   Wand2,
@@ -37,9 +31,8 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import type { MidiFileEntry, MidiNote, TriageStatus } from '../types/midi';
-import { getGmProgramName, getMidiCcLabel } from '../utils/midiConstants';
 import type { DuplicateMatchInfo } from '../utils/midiDuplicates';
-import { formatBytes, formatDuration, midiPitchToName } from '../utils/midiParser';
+import { formatDuration, midiPitchToName } from '../utils/midiParser';
 import type { MidiChannelRouting, MidiPlaybackState } from '../utils/midiPlayer';
 import {
   buildBarGrid,
@@ -69,11 +62,16 @@ interface MidiPianoRollProps {
   onRefreshMidiOutputs: () => void;
   onChangeMidiChannelRouting: (routing: MidiChannelRouting) => void;
   onMidiPanic: () => void;
+  onLoadSoundFont: (file: File) => void;
+  onUnloadSoundFont: () => void;
+  onSelectSoundFontSource: (sourceId: string) => void;
+  onRefreshSoundFontLibrary: () => void;
+  onSelectSf2Preset: (presetId: string | null) => void;
+  onToggleReverb: () => void;
   onTriage: (status: TriageStatus) => void;
   canWriteToDisk: boolean;
   protectOriginals: boolean;
   onToggleProtectOriginals?: () => void;
-  onImmediateMoveToSorted?: (entry: MidiFileEntry) => void;
   onTrimMidi: (
     entry: MidiFileEntry,
     trimStartTick: number,
@@ -86,9 +84,8 @@ interface MidiPianoRollProps {
   renameTrigger: number;
   onRenameMidi: (entry: MidiFileEntry, newFilename: string) => Promise<void>;
   onAnalyzeSmartTrim: (entry: MidiFileEntry) => Promise<SmartTrimSuggestion | null>;
-  onOpenTrainingTxt: (entry: MidiFileEntry) => void;
   duplicateInfo?: DuplicateMatchInfo | null;
-  onSelectEntry?: (id: string) => void;
+  onOpenInspectorTab?: (tab: 'metadata' | 'tracks' | 'details' | 'diagnostics') => void;
 }
 
 const TRACK_COLORS = [
@@ -117,11 +114,16 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   onRefreshMidiOutputs,
   onChangeMidiChannelRouting,
   onMidiPanic,
+  onLoadSoundFont,
+  onUnloadSoundFont,
+  onSelectSoundFontSource,
+  onRefreshSoundFontLibrary,
+  onSelectSf2Preset,
+  onToggleReverb,
   onTriage,
   canWriteToDisk,
   protectOriginals,
   onToggleProtectOriginals,
-  onImmediateMoveToSorted,
   onTrimMidi,
   onRestoreOriginalMidi,
   onSaveTrimmedCopy,
@@ -130,13 +132,13 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   renameTrigger,
   onRenameMidi,
   onAnalyzeSmartTrim,
-  onOpenTrainingTxt,
   duplicateInfo,
-  onSelectEntry,
+  onOpenInspectorTab,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const sf2InputRef = useRef<HTMLInputElement | null>(null);
   const [size, setSize] = useState({ width: 800, height: 500 });
   const [zoomX, setZoomX] = useState<number>(1);
   const [scrollX, setScrollX] = useState<number>(0);
@@ -144,12 +146,10 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   const [colorByTrack, setColorByTrack] = useState<boolean>(false);
   const [showVelocity, setShowVelocity] = useState<boolean>(true);
   const [showChords, setShowChords] = useState<boolean>(true);
-  const [showMetadata, setShowMetadata] = useState<boolean>(true);
-  const [metaExpanded, setMetaExpanded] = useState<boolean>(false);
+  const showMetadata = true;
   const [volume, setVolume] = useState<number>(0.75);
   const [isEditingBpm, setIsEditingBpm] = useState<boolean>(false);
   const [bpmDraft, setBpmDraft] = useState<string>('');
-  const [copiedHash, setCopiedHash] = useState<boolean>(false);
   const [confirmOverwrite, setConfirmOverwrite] = useState<boolean>(false);
   const [hoveredNote, setHoveredNote] = useState<{
     note: MidiNote;
@@ -191,16 +191,6 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
   const [renameError, setRenameError] = useState<string | null>(null);
   const [renameBusy, setRenameBusy] = useState<boolean>(false);
 
-  const handleCopySha256 = async (hash: string) => {
-    try {
-      await navigator.clipboard.writeText(hash);
-      setCopiedHash(true);
-      window.setTimeout(() => setCopiedHash(false), 1800);
-    } catch {
-      // Clipboard API unavailable
-    }
-  };
-
   const splitExtension = (name: string): { base: string; ext: string } => {
     const match = name.match(/^(.*?)(\.(?:mid|midi))$/i);
     if (match) return { base: match[1], ext: match[2] };
@@ -238,9 +228,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
     setSmartSuggestion(null);
     setIsRenaming(false);
     setRenameError(null);
-    setMetaExpanded(false);
     setIsEditingBpm(false);
-    setCopiedHash(false);
     setConfirmOverwrite(false);
   }, [entry?.id]);
 
@@ -1160,165 +1148,71 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
           )}
 
           {parsed ? (
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#919aa6] font-mono tabular-nums">
-              {entry.folderPath && (
-                <>
-                  <span className="text-[#78828f] truncate max-w-[180px]">{entry.folderPath}</span>
-                  <span aria-hidden="true">·</span>
-                </>
-              )}
-              <span className={parsed.notes.length === 0 ? 'text-rose-400 font-medium' : 'text-[#c9d2dc]'}>
-                {parsed.notes.length} Noten
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-[#919aa6] font-mono tabular-nums">
+              {harmony?.key ? (
+                <span className="text-[#8fc8e8] font-medium">{harmony.key.label}</span>
+              ) : harmony?.isPercussionOnly ? (
+                <span className="text-[#8fc8e8]">Drums</span>
+              ) : null}
+              {(harmony?.key || harmony?.isPercussionOnly) && <span aria-hidden="true">·</span>}
+
+              <span
+                className={
+                  playback.isTempoOverridden
+                    ? 'text-[#7cc4f0]'
+                    : !parsed.hasExplicitTempo
+                    ? 'text-amber-300/85'
+                    : ''
+                }
+              >
+                {parsed.hasExplicitTempo
+                  ? `${parsed.primaryBpm} BPM${parsed.hasTempoChanges ? ` (${parsed.tempos.length}×)` : ''}`
+                  : '120 BPM Std.'}
               </span>
+              <span aria-hidden="true">·</span>
+              <span>{parsed.primaryTimeSignature}</span>
               <span aria-hidden="true">·</span>
               <span>{parsed.barCount} Takte</span>
               <span aria-hidden="true">·</span>
               <span>{formatDuration(parsed.totalDurationSec)}</span>
               <span aria-hidden="true">·</span>
-              {(() => {
-                if (!parsed.hasExplicitTempo) {
-                  return (
-                    <span
-                      className={playback.isTempoOverridden ? 'text-[#7cc4f0]' : 'text-amber-300/90'}
-                      title="Kein Tempo-Meta-Event (0x51) in der MIDI-Datei gefunden — Wiedergabe nutzt 120 BPM Standard"
-                    >
-                      Kein Tempo-Tag (120 BPM Std.)
-                      {playback.isTempoOverridden ? ` → ${playback.playbackBpm} BPM` : ''}
-                    </span>
-                  );
-                }
-                if (parsed.hasTempoChanges) {
-                  const bpms = parsed.tempos.map((t) => Math.round(t.bpm));
-                  const minBpm = Math.min(...bpms);
-                  const maxBpm = Math.max(...bpms);
-                  const tempoSummary = parsed.tempos
-                    .map((t) => `T${tickToBarNumber(barGrid, t.tick)}: ${Math.round(t.bpm)} BPM`)
-                    .join(' · ');
-                  return (
-                    <span
-                      className={playback.isTempoOverridden ? 'text-[#7cc4f0]' : 'text-[#9bd3ff]'}
-                      title={`Tempowechsel (${parsed.tempos.length}×): ${tempoSummary}`}
-                    >
-                      {minBpm === maxBpm ? `${minBpm} BPM` : `${minBpm}–${maxBpm} BPM`} ({parsed.tempos.length}×)
-                      {playback.isTempoOverridden ? ` · ~${playback.playbackBpm}` : ''}
-                    </span>
-                  );
-                }
-                return (
-                  <span
-                    className={playback.isTempoOverridden ? 'text-[#7cc4f0]' : ''}
-                    title={
-                      playback.isTempoOverridden
-                        ? `MIDI-Header-Tempo: ${parsed.primaryBpm} BPM · Wiedergabe: ${playback.playbackBpm} BPM`
-                        : 'Aus MIDI-Header extrahiertes Tempo'
-                    }
-                  >
-                    {parsed.primaryBpm} BPM
-                    {playback.isTempoOverridden ? ` → ${playback.playbackBpm} BPM` : ''}
-                  </span>
-                );
-              })()}
-              <span aria-hidden="true">·</span>
-              {(() => {
-                if (!parsed.hasExplicitTimeSignature) {
-                  return (
-                    <span
-                      className="text-[#8b95a3]"
-                      title="Keine Taktart-Angabe (0x58) im MIDI-Header — Standard 4/4 verwendet"
-                    >
-                      {parsed.primaryTimeSignature} (Std.)
-                    </span>
-                  );
-                }
-                if (parsed.hasTimeSignatureChanges) {
-                  const tsSummary = parsed.timeSignatures
-                    .map((ts) => `T${ts.bar}: ${ts.numerator}/${ts.denominator}`)
-                    .join(' → ');
-                  const preview = parsed.timeSignatures
-                    .slice(0, 3)
-                    .map((ts) => `${ts.numerator}/${ts.denominator}`)
-                    .join('→');
-                  return (
-                    <span
-                      className="text-[#7fd9cb]"
-                      title={`Taktartwechsel (${parsed.timeSignatures.length}×): ${tsSummary}`}
-                    >
-                      {preview}
-                      {parsed.timeSignatures.length > 3 ? '…' : ''} ({parsed.timeSignatures.length}×)
-                    </span>
-                  );
-                }
-                return <span>{parsed.primaryTimeSignature}</span>;
-              })()}
-              <span aria-hidden="true">·</span>
-              <span>
-                {parsed.trackCount} {parsed.trackCount === 1 ? 'Spur' : 'Spuren'}
+              <span className={parsed.notes.length === 0 ? 'text-rose-400 font-medium' : ''}>
+                {parsed.notes.length} Noten
               </span>
-              {parsed.performance.channels.length > 0 && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span
-                    className="text-[#9eb7cf]"
-                    title={`Aktive MIDI-Kanäle: ${parsed.performance.channels
-                      .map((c) => `Ch ${c.channel + 1}${c.isDrum ? ' (Drums)' : ''}`)
-                      .join(', ')}`}
-                  >
-                    Ch {parsed.performance.channels.map((c) => c.channel + 1).join(',')}
-                  </span>
-                </>
+
+              {/* Clickable compact status pills that jump right to Inspector Diagnostics tab */}
+              {parsed.issues.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onOpenInspectorTab?.('diagnostics')}
+                  className={`inline-flex items-center gap-1 px-1.5 py-0 rounded text-[10.5px] font-sans font-medium border transition-colors ${
+                    parsed.hasErrors
+                      ? 'bg-rose-950/50 border-rose-700/60 text-rose-200 hover:bg-rose-900/50'
+                      : 'bg-amber-950/45 border-amber-700/50 text-amber-200 hover:bg-amber-900/45'
+                  }`}
+                  title="Prüfhinweise im Inspektor öffnen"
+                >
+                  {parsed.hasErrors ? (
+                    <XCircle className="w-3 h-3 text-rose-400" />
+                  ) : (
+                    <AlertTriangle className="w-3 h-3 text-amber-400" />
+                  )}
+                  {parsed.issues.length} {parsed.issues.length === 1 ? 'Hinweis' : 'Hinweise'}
+                </button>
               )}
-              {parsed.notes.length > 0 && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span>
-                    {midiPitchToName(parsed.minPitch)}–{midiPitchToName(parsed.maxPitch)}
-                  </span>
-                </>
-              )}
-              {harmony?.isPercussionOnly && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="text-[#8fc8e8]">Drums / Percussion</span>
-                </>
-              )}
-              {harmony?.key ? (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span
-                    className="text-[#8fc8e8] font-medium"
-                    title={`Parallele Tonart: ${harmony.key.relativeLabel}${
-                      harmony.secondaryKey ? ` · Ebenfalls nah: ${harmony.secondaryKey}` : ''
-                    }`}
-                  >
-                    Tonart: {harmony.key.label} ({harmony.key.confidence}%)
-                  </span>
-                </>
-              ) : !harmony?.isPercussionOnly && harmony?.keyStatus === 'unknown' ? (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span
-                    className="text-[#8b95a3]"
-                    title={harmony.keyUnknownReason || 'Tonart nicht eindeutig bestimmbar'}
-                  >
-                    Tonart: Unbekannt
-                  </span>
-                </>
-              ) : null}
-              <span aria-hidden="true">·</span>
-              <span>{formatBytes(entry.sizeBytes)}</span>
-              {entry.sha256 && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <button
-                    type="button"
-                    onClick={() => handleCopySha256(entry.sha256!)}
-                    className="inline-flex items-center gap-1 text-[#8293a6] hover:text-[#cde7fb] transition-colors"
-                    title={`SHA-256: ${entry.sha256} (Klicken zum Kopieren)`}
-                  >
-                    <Hash className="w-3 h-3" />
-                    <span>{copiedHash ? 'Hash kopiert!' : entry.sha256.slice(0, 8)}</span>
-                  </button>
-                </>
+
+              {duplicateInfo && (
+                <button
+                  type="button"
+                  onClick={() => onOpenInspectorTab?.('diagnostics')}
+                  className="inline-flex items-center gap-1 px-1.5 py-0 rounded text-[10.5px] font-sans font-medium border bg-violet-950/45 border-violet-700/50 text-violet-200 hover:bg-violet-900/45 transition-colors"
+                  title="Duplikate / Varianten im Inspektor vergleichen"
+                >
+                  <Copy className="w-3 h-3" />
+                  {duplicateInfo.kind === 'variant'
+                    ? `Variante ${duplicateInfo.similarity}%`
+                    : `Duplikat #${duplicateInfo.groupId}`}
+                </button>
               )}
             </div>
           ) : (
@@ -1328,53 +1222,8 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
           )}
         </div>
 
-        {/* View Controls (Trim / Zoom / Pitch Fit / Track Colors / Velocity) */}
-        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-          {parsed && parsed.notes.length > 0 && parsed.firstNoteTick > 0 && (
-            <button
-              type="button"
-              disabled={trimBusy || smartTrimBlocked}
-              onClick={async () => {
-                setTrimBusy(true);
-                try {
-                  await onTrimMidi(entry, parsed.firstNoteTick, null);
-                  setTrimMode(false);
-                  setTrimNotice(
-                    `Vorlauf bis zur 1. Note entfernt (−${parsed.firstNoteSec.toFixed(1)} s).`
-                  );
-                } finally {
-                  setTrimBusy(false);
-                }
-              }}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border bg-[#233340] border-[#4ea1d3]/70 text-[#d8ecfa] hover:bg-[#2b4050] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
-              title={
-                smartTrimBlocked
-                  ? `Bei vollständigen Kompositionen standardmäßig deaktiviert (${parsed.completeCompositionReason || 'vollständiges Stück'}). Im „Trimmen“-Menü bei Bedarf aktivierbar.`
-                  : `Schneidet die Stille vor der 1. Note ab (${parsed.firstNoteSec.toFixed(1)} s / ${parsed.leadingBars} Takte)`
-              }
-            >
-              <Scissors className="w-3.5 h-3.5 text-[#5eb1e6]" />
-              Auf 1. Note kürzen
-            </button>
-          )}
-
-          {parsed && parsed.notes.length > 0 && (
-            <button
-              type="button"
-              disabled={trimBusy || smartTrimBlocked}
-              onClick={runSmartTrimSilence}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border bg-[#233340] border-[#4ea1d3]/70 text-[#d8ecfa] hover:bg-[#2b4050] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
-              title={
-                smartTrimBlocked
-                  ? `Bei vollständigen Kompositionen standardmäßig deaktiviert (${parsed.completeCompositionReason || 'vollständiges Stück'}). Im „Trimmen“-Menü bei Bedarf aktivierbar.`
-                  : 'Analysiert die MIDI-Datei automatisch auf führende Stille und schlägt den optimalen Schnittpunkt vor'
-              }
-            >
-              <Wand2 className="w-3.5 h-3.5 text-[#5eb1e6]" />
-              Smart Trim Silence
-            </button>
-          )}
-
+        {/* Clean, Minimal View Controls */}
+        <div className="flex items-center gap-1.5 shrink-0">
           {parsed && parsed.notes.length > 0 && (
             <button
               type="button"
@@ -1389,118 +1238,80 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                   setSmartSuggestion(null);
                 }
               }}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
                 trimMode
-                  ? 'bg-[#2a333f] border-[#4ea1d3]/70 text-[#d8e9f5]'
-                  : 'bg-[#22272f] border-[#313844] text-[#9aa3b0] hover:text-white'
+                  ? 'bg-[#253b4d] border-[#4ea1d3]/70 text-[#e0f2ff]'
+                  : 'bg-[#22272f] border-[#313844] text-[#a7b0bd] hover:text-white'
               }`}
-              title="Start- und End-Schnittpunkte frei in der Piano-Roll setzen"
+              title="Trim-Modus öffnen (Vorlauf/Stille schneiden, Smart Trim)"
             >
               <Scissors className="w-3.5 h-3.5" />
-              Trimmen
+              Trim
             </button>
           )}
 
-          {parsed && parsed.notes.length > 0 && (
+          {/* Grouped Canvas View Toggles */}
+          <div className="flex items-center bg-[#181c21] border border-[#2d3440] rounded p-0.5">
             <button
               type="button"
-              onClick={() => onOpenTrainingTxt(entry)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border bg-[#222c28] border-emerald-600/60 text-emerald-200 hover:bg-[#293832] transition-colors whitespace-nowrap"
-              title="Erstellt eine strukturierte .txt-Beschreibungsdatei (Tonart, Stil, Spuren, Abschnitte) für dein MIDI-Training"
+              onClick={() => setColorByTrack((v) => !v)}
+              className={`px-2 py-0.5 text-[11px] font-medium rounded transition-colors ${
+                colorByTrack ? 'bg-[#2a3644] text-[#dceeff]' : 'text-[#8c96a4] hover:text-white'
+              }`}
+              title="Spuren farblich unterscheiden"
             >
-              <FileText className="w-3.5 h-3.5 text-emerald-400" />
-              Training-TXT
+              Farben
             </button>
-          )}
+            <button
+              type="button"
+              onClick={() => setFullPitchRange((v) => !v)}
+              className={`px-2 py-0.5 text-[11px] font-medium rounded transition-colors ${
+                fullPitchRange ? 'bg-[#2a3644] text-[#dceeff]' : 'text-[#8c96a4] hover:text-white'
+              }`}
+              title="Zwischen Auto-Fokus und vollem 88-Tasten-Bereich wechseln"
+            >
+              88T
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowVelocity((v) => !v)}
+              className={`px-2 py-0.5 text-[11px] font-medium rounded transition-colors ${
+                showVelocity ? 'bg-[#2a3644] text-[#dceeff]' : 'text-[#8c96a4] hover:text-white'
+              }`}
+              title="Velocity-Balken ein-/ausblenden"
+            >
+              Vel
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowChords((v) => !v)}
+              className={`px-2 py-0.5 text-[11px] font-medium rounded transition-colors ${
+                showChords ? 'bg-[#2a3644] text-[#dceeff]' : 'text-[#8c96a4] hover:text-white'
+              }`}
+              title="Akkord-Spur in der Piano-Roll ein-/ausblenden"
+            >
+              Akk
+            </button>
+          </div>
 
-          <button
-            type="button"
-            onClick={() => setColorByTrack((v) => !v)}
-            className={`px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
-              colorByTrack
-                ? 'bg-[#2a333f] border-[#4ea1d3]/60 text-[#d8e9f5]'
-                : 'bg-[#22272f] border-[#313844] text-[#9aa3b0] hover:text-white'
-            }`}
-            title="Spuren unterschiedlich einfärben"
-          >
-            Spurfarben
-          </button>
-          <button
-            type="button"
-            onClick={() => setFullPitchRange((v) => !v)}
-            className={`px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
-              fullPitchRange
-                ? 'bg-[#2a333f] border-[#4ea1d3]/60 text-[#d8e9f5]'
-                : 'bg-[#22272f] border-[#313844] text-[#9aa3b0] hover:text-white'
-            }`}
-            title="Zwischen Auto-Fokus und vollem 88-Tasten-Bereich wechseln"
-          >
-            {fullPitchRange ? '88 Tasten' : 'Auto-Fokus'}
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowVelocity((v) => !v)}
-            className={`px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
-              showVelocity
-                ? 'bg-[#2a333f] border-[#4ea1d3]/60 text-[#d8e9f5]'
-                : 'bg-[#22272f] border-[#313844] text-[#9aa3b0] hover:text-white'
-            }`}
-          >
-            Velocity
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowChords((v) => !v)}
-            className={`px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
-              showChords
-                ? 'bg-[#2a333f] border-[#4ea1d3]/60 text-[#d8e9f5]'
-                : 'bg-[#22272f] border-[#313844] text-[#9aa3b0] hover:text-white'
-            }`}
-            title="Tonart und erkannte Akkordfolge ein- oder ausblenden"
-          >
-            Akkorde
-          </button>
-          {parsed &&
-            (parsed.metadata.totalCount > 0 ||
-              parsed.performance.totalCount > 0 ||
-              parsed.performance.channels.length > 0 ||
-              parsed.hasTempoChanges ||
-              parsed.hasTimeSignatureChanges ||
-              !parsed.hasExplicitTempo ||
-              !parsed.hasExplicitTimeSignature ||
-              Boolean(entry.sha256)) && (
-              <button
-                type="button"
-                onClick={() => setShowMetadata((v) => !v)}
-                className={`px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
-                  showMetadata
-                    ? 'bg-[#2a333f] border-[#4ea1d3]/60 text-[#d8e9f5]'
-                    : 'bg-[#22272f] border-[#313844] text-[#9aa3b0] hover:text-white'
-                }`}
-                title="SHA-256 Hash, Tempo-/Taktverlauf, MIDI-Kanäle, CC / Pitch Bend / Aftertouch / Program Changes und Metadaten ein- oder ausblenden"
-              >
-                Events &amp; Info ({parsed.metadata.totalCount + parsed.performance.totalCount})
-              </button>
-            )}
-
-          <div className="flex items-center bg-[#22272f] border border-[#313844] rounded ml-1">
+          <div className="flex items-center bg-[#181c21] border border-[#2d3440] rounded">
             <button
               type="button"
               onClick={() => setZoomX((z) => Math.max(1, Number((z / 1.5).toFixed(2))))}
               disabled={zoomX <= 1}
-              className="p-1.5 text-[#9aa3b0] hover:text-white disabled:opacity-35 transition-colors"
+              className="p-1 text-[#9aa3b0] hover:text-white disabled:opacity-35 transition-colors"
               title="Herauszoomen"
             >
               <ZoomOut className="w-3.5 h-3.5" />
             </button>
-            <span className="px-1.5 text-[11px] font-mono tabular-nums text-[#b9c1cc] min-w-[38px] text-center">
+            <span className="px-1 text-[11px] font-mono tabular-nums text-[#b9c1cc] min-w-[34px] text-center">
               {zoomX.toFixed(1)}×
             </span>
             <button
               type="button"
               onClick={() => setZoomX((z) => Math.min(12, Number((z * 1.5).toFixed(2))))}
               disabled={zoomX >= 12}
-              className="p-1.5 text-[#9aa3b0] hover:text-white disabled:opacity-35 transition-colors"
+              className="p-1 text-[#9aa3b0] hover:text-white disabled:opacity-35 transition-colors"
               title="Hineinzoomen"
             >
               <ZoomIn className="w-3.5 h-3.5" />
@@ -1512,7 +1323,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
                   setZoomX(1);
                   setScrollX(0);
                 }}
-                className="p-1.5 text-[#9aa3b0] hover:text-white border-l border-[#313844] transition-colors"
+                className="p-1 text-[#9aa3b0] hover:text-white border-l border-[#2d3440] transition-colors"
                 title="Ganze Datei einpassen"
               >
                 <Maximize2 className="w-3.5 h-3.5" />
@@ -1522,604 +1333,7 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
         </div>
       </div>
 
-      {/* Interactive Harmony / Chord Progression Strip */}
-      {showChords &&
-        parsed &&
-        harmony &&
-        (harmony.key || harmony.keyStatus === 'unknown' || harmony.chords.length > 0) && (
-        <div className="px-4 py-1.5 bg-[#181d23] border-b border-[#27303a] flex items-center gap-2.5 overflow-x-auto shrink-0">
-          <div className="flex items-center gap-1.5 text-xs text-[#9fb2c7] shrink-0">
-            <Music2 className="w-3.5 h-3.5 text-[#5eb1e6]" />
-            {harmony.key ? (
-              <>
-                <span className="font-medium text-[#dce8f5] whitespace-nowrap">
-                  {harmony.key.label}
-                </span>
-                <span
-                  className="text-[11px] font-mono text-[#7c8c9e] whitespace-nowrap"
-                  title="Relative Paralleltonart"
-                >
-                  ({harmony.key.relativeLabel})
-                </span>
-              </>
-            ) : harmony.keyStatus === 'unknown' ? (
-              <span
-                className="text-[#8b95a3] whitespace-nowrap"
-                title={harmony.keyUnknownReason || 'Tonart nicht eindeutig bestimmbar'}
-              >
-                Tonart: Unbekannt
-              </span>
-            ) : null}
-          </div>
-
-          {harmony.chords.length > 0 && (() => {
-            const playTick =
-              parsed.totalDurationSec > 0 && (playback.isPlaying || playback.currentSec > 0)
-                ? secondsToTick(parsed, playback.currentSec)
-                : -1;
-
-            return (
-              <>
-                <span className="text-[#36414d] select-none shrink-0">|</span>
-                <div className="flex items-center gap-1 min-w-0">
-                  {harmony.chords.slice(0, 32).map((ch, idx) => {
-                    const isActive = playTick >= ch.startTick && playTick < ch.endTick;
-                    return (
-                      <React.Fragment key={`${ch.startTick}-${ch.symbol}-${idx}`}>
-                        {idx > 0 && (
-                          <span className="text-[#4a5665] text-[10px] select-none">→</span>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (parsed.totalTicks > 0 && parsed.totalDurationSec > 0) {
-                              onSeek(tickToSeconds(parsed, ch.startTick));
-                            }
-                          }}
-                          className={`px-1.5 py-0.5 rounded border text-[11px] font-mono font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                            isActive
-                              ? 'bg-[#2c4a63] border-[#5eb1e6] text-white'
-                              : 'bg-[#212933] hover:bg-[#2b3746] border-[#313d4a] text-[#cde7fb]'
-                          }`}
-                          title={`Takt ${ch.startBar} · Zum Akkord springen`}
-                        >
-                          {ch.symbol}
-                        </button>
-                      </React.Fragment>
-                    );
-                  })}
-                  {harmony.chords.length > 32 && (
-                    <span className="text-[11px] font-mono text-[#7c8c9e] ml-1 whitespace-nowrap">
-                      +{harmony.chords.length - 32} weitere
-                    </span>
-                  )}
-                </div>
-              </>
-            );
-          })()}
-
-          {harmony.chords.length === 0 && !harmony.isPercussionOnly && (
-            <span className="text-[11px] text-[#7c8c9e] whitespace-nowrap">
-              {harmony.keyStatus === 'unknown' && harmony.keyUnknownReason
-                ? harmony.keyUnknownReason
-                : 'Einzelmelodie / zu wenig gleichzeitige Harmonien für Akkorderkennung'}
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* MIDI Metadata, SHA-256 & Performance Events Summary Bar + Expandable Inspector */}
-      {showMetadata &&
-        parsed &&
-        (parsed.metadata.totalCount > 0 ||
-          parsed.performance.totalCount > 0 ||
-          parsed.performance.channels.length > 0 ||
-          parsed.hasTempoChanges ||
-          parsed.hasTimeSignatureChanges ||
-          !parsed.hasExplicitTempo ||
-          !parsed.hasExplicitTimeSignature ||
-          Boolean(entry.sha256)) &&
-        (() => {
-          const md = parsed.metadata;
-          const perf = parsed.performance;
-          const formatTickBar = (tick: number) => tickToBarNumber(barGrid, tick);
-
-          // Group Control Change events by controller number for compact readable summary
-          const ccGroupsMap = new Map<
-            number,
-            {
-              controller: number;
-              label: string;
-              count: number;
-              minVal: number;
-              maxVal: number;
-              firstSec: number;
-            }
-          >();
-          for (const cc of perf.controlChanges) {
-            const existing = ccGroupsMap.get(cc.controller);
-            if (!existing) {
-              ccGroupsMap.set(cc.controller, {
-                controller: cc.controller,
-                label: getMidiCcLabel(cc.controller),
-                count: 1,
-                minVal: cc.value,
-                maxVal: cc.value,
-                firstSec: cc.sec,
-              });
-            } else {
-              existing.count += 1;
-              if (cc.value < existing.minVal) existing.minVal = cc.value;
-              if (cc.value > existing.maxVal) existing.maxVal = cc.value;
-            }
-          }
-          const ccGroups = Array.from(ccGroupsMap.values()).sort((a, b) => b.count - a.count);
-
-          const pbRange =
-            perf.pitchBends.length > 0
-              ? perf.pitchBends.reduce(
-                  (acc, ev) => ({
-                    min: Math.min(acc.min, ev.value),
-                    max: Math.max(acc.max, ev.value),
-                  }),
-                  { min: perf.pitchBends[0].value, max: perf.pitchBends[0].value }
-                )
-              : null;
-
-          const maxAftertouch =
-            perf.aftertouch.length > 0
-              ? perf.aftertouch.reduce((m, ev) => Math.max(m, ev.pressure), 0)
-              : 0;
-
-          return (
-            <div className="bg-[#171c22] border-b border-[#27303a] shrink-0">
-              {/* Compact 1-line summary bar */}
-              <div className="px-4 py-1.5 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3 min-w-0 overflow-x-auto text-xs">
-                  {perf.channels.length > 0 && (
-                    <span
-                      className="inline-flex items-center gap-1.5 text-[#a7c2dc] font-mono whitespace-nowrap shrink-0"
-                      title="Aktive MIDI-Kanäle (1–16)"
-                    >
-                      <Sliders className="w-3.5 h-3.5 text-[#5eb1e6] shrink-0" />
-                      <span>
-                        Kanäle: {perf.channels.map((c) => `${c.channel + 1}${c.isDrum ? 'D' : ''}`).join(', ')}
-                      </span>
-                    </span>
-                  )}
-
-                  {perf.totalCount > 0 && (
-                    <span
-                      className="inline-flex items-center gap-2 font-mono text-[11px] text-[#9fb2c7] whitespace-nowrap shrink-0"
-                      title="Erfasste Performance-Events: CC / Pitch Bend / Aftertouch / Program Change"
-                    >
-                      <Activity className="w-3.5 h-3.5 text-[#6fd17e] shrink-0" />
-                      {perf.controlChanges.length > 0 && <span>CC {perf.controlChanges.length}</span>}
-                      {perf.pitchBends.length > 0 && <span>PB {perf.pitchBends.length}</span>}
-                      {perf.aftertouch.length > 0 && <span>AT {perf.aftertouch.length}</span>}
-                      {perf.programChanges.length > 0 && <span>PC {perf.programChanges.length}</span>}
-                    </span>
-                  )}
-
-                  {md.copyright.length > 0 && (
-                    <span
-                      className="inline-flex items-center gap-1.5 text-[#c9d4e0] whitespace-nowrap shrink-0"
-                      title={md.copyright.join(' · ')}
-                    >
-                      <Copyright className="w-3.5 h-3.5 text-[#7ea8c9] shrink-0" />
-                      <span className="truncate max-w-[200px]">{md.copyright[0]}</span>
-                    </span>
-                  )}
-
-                  {md.instruments.length > 0 && (
-                    <span
-                      className="inline-flex items-center gap-1.5 text-[#9eb0c4] whitespace-nowrap shrink-0"
-                      title={`Instrumente: ${md.instruments.join(', ')}`}
-                    >
-                      <FileText className="w-3.5 h-3.5 text-[#6d94b5] shrink-0" />
-                      <span className="truncate max-w-[180px]">{md.instruments.join(', ')}</span>
-                    </span>
-                  )}
-
-                  {md.markers.length > 0 && (
-                    <div className="flex items-center gap-1 shrink-0">
-                      <Bookmark className="w-3.5 h-3.5 text-[#e6b450] mr-0.5 shrink-0" />
-                      {md.markers.slice(0, 6).map((mk, idx) => (
-                        <button
-                          key={`${mk.tick}-${mk.text}-${idx}`}
-                          type="button"
-                          onClick={() => onSeek(mk.sec)}
-                          className="px-1.5 py-0.5 rounded bg-[#25221a] hover:bg-[#332e21] border border-[#4c4025] text-[11px] font-mono text-[#f3cf7a] transition-colors whitespace-nowrap"
-                          title={`Takt ${formatTickBar(mk.tick)} (${formatDuration(mk.sec)}) · Zu Marker springen`}
-                        >
-                          {mk.text}
-                        </button>
-                      ))}
-                      {md.markers.length > 6 && (
-                        <span className="text-[11px] font-mono text-[#8b95a3] whitespace-nowrap">
-                          +{md.markers.length - 6}
-                        </span>
-                      )}
-                    </div>
-                  )}
-
-                  {md.textEvents.length > 0 && md.copyright.length === 0 && md.markers.length === 0 && (
-                    <span
-                      className="inline-flex items-center gap-1.5 text-[#b5c2d1] truncate"
-                      title={md.textEvents[0].text}
-                    >
-                      <FileText className="w-3.5 h-3.5 text-[#7ea8c9] shrink-0" />
-                      <span className="truncate max-w-[280px]">{md.textEvents[0].text}</span>
-                    </span>
-                  )}
-
-                  {md.embeddedKeySignature && (
-                    <span className="text-[11px] font-mono text-[#8495a8] whitespace-nowrap shrink-0">
-                      MIDI-Tonart: {md.embeddedKeySignature}
-                    </span>
-                  )}
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setMetaExpanded((v) => !v)}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium text-[#9fb2c7] hover:text-white bg-[#20262f] hover:bg-[#2a323d] border border-[#2f3845] transition-colors whitespace-nowrap shrink-0"
-                >
-                  <span>
-                    {metaExpanded
-                      ? 'Weniger'
-                      : `Details & Events (${md.totalCount + perf.totalCount})`}
-                  </span>
-                  {metaExpanded ? (
-                    <ChevronUp className="w-3 h-3" />
-                  ) : (
-                    <ChevronDown className="w-3 h-3" />
-                  )}
-                </button>
-              </div>
-
-              {/* Expanded Inspector Panel */}
-              {metaExpanded && (
-                <div className="px-4 py-3 bg-[#13171c] border-t border-[#232b35] max-h-64 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-xs">
-                  {/* Column 1: SHA-256 Integrity & File Metadata */}
-                  <div className="space-y-2">
-                    <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
-                      Datei-Integrität (SHA-256) &amp; Werkangaben
-                    </div>
-                    {entry.sha256 && (
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-[#798696] w-24 shrink-0">SHA-256:</span>
-                          <code className="text-[11px] font-mono text-[#a8d8f5] break-all">
-                            {entry.sha256}
-                          </code>
-                          <button
-                            type="button"
-                            onClick={() => handleCopySha256(entry.sha256!)}
-                            className="px-1.5 py-0.5 rounded bg-[#1f2630] hover:bg-[#2a3442] border border-[#313b4a] text-[10px] text-[#c7d5e5] shrink-0"
-                            title="Vollständigen SHA-256-Hash kopieren"
-                          >
-                            {copiedHash ? 'Kopiert' : 'Copy'}
-                          </button>
-                        </div>
-                        {entry.originalSha256 && entry.originalSha256 !== entry.sha256 && (
-                          <div className="flex items-center gap-2">
-                            <span className="text-[#798696] w-24 shrink-0">Original-Hash:</span>
-                            <code className="text-[11px] font-mono text-[#7c8a9c] break-all">
-                              {entry.originalSha256}
-                            </code>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    {md.sequenceName && (
-                      <div className="flex gap-2">
-                        <span className="text-[#798696] w-24 shrink-0">Titel / Sequenz:</span>
-                        <span className="text-[#dce4ee] break-words">{md.sequenceName}</span>
-                      </div>
-                    )}
-                    {md.copyright.map((c, idx) => (
-                      <div key={idx} className="flex gap-2">
-                        <span className="text-[#798696] w-24 shrink-0">Copyright:</span>
-                        <span className="text-[#dce4ee] break-words">{c}</span>
-                      </div>
-                    ))}
-                    {md.instruments.length > 0 && (
-                      <div className="flex gap-2">
-                        <span className="text-[#798696] w-24 shrink-0">Instrumente:</span>
-                        <span className="text-[#c5d1de] break-words">{md.instruments.join(', ')}</span>
-                      </div>
-                    )}
-                    {md.embeddedKeySignature && (
-                      <div className="flex gap-2">
-                        <span className="text-[#798696] w-24 shrink-0">MIDI Key-Tag:</span>
-                        <span className="text-[#8fc8e8] font-mono">{md.embeddedKeySignature}</span>
-                      </div>
-                    )}
-
-                    {/* Tempo & Time-Signature Timeline */}
-                    <div className="pt-1 space-y-1">
-                      <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
-                        Tempo- &amp; Taktartverlauf
-                      </div>
-                      <div className="space-y-1">
-                        {!parsed.hasExplicitTempo ? (
-                          <div className="px-2 py-1 rounded bg-[#242016] border border-amber-700/40 text-[11px] text-amber-200/90">
-                            Keine Tempoangabe (0x51) im MIDI-Header — 120 BPM Standardwert aktiv
-                          </div>
-                        ) : (
-                          parsed.tempos.map((t, idx) => (
-                            <button
-                              key={`tempo-${t.tick}-${idx}`}
-                              type="button"
-                              onClick={() => onSeek(t.sec)}
-                              className="w-full text-left flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#181e26] hover:bg-[#1e2630] border border-[#252e3a] transition-colors"
-                              title="Zu diesem Tempowechsel springen"
-                            >
-                              <span className="font-mono text-[#7cc4f0]">
-                                Tempo · T{formatTickBar(t.tick)} ({formatDuration(t.sec)})
-                              </span>
-                              <span className="font-mono font-semibold text-[#dce8f5]">
-                                {Math.round(t.bpm * 10) / 10} BPM
-                              </span>
-                            </button>
-                          ))
-                        )}
-                        {!parsed.hasExplicitTimeSignature ? (
-                          <div className="px-2 py-1 rounded bg-[#181e26] border border-[#252e3a] text-[11px] text-[#8d9cb0]">
-                            Keine Taktart-Angabe (0x58) im MIDI-Header — 4/4 Standard aktiv
-                          </div>
-                        ) : (
-                          parsed.timeSignatures.map((ts, idx) => (
-                            <button
-                              key={`ts-${ts.tick}-${idx}`}
-                              type="button"
-                              onClick={() => onSeek(ts.sec)}
-                              className="w-full text-left flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#181e26] hover:bg-[#1e2630] border border-[#252e3a] transition-colors"
-                              title="Zu diesem Taktartwechsel springen"
-                            >
-                              <span className="font-mono text-[#5fd4c2]">
-                                Taktart · T{ts.bar} ({formatDuration(ts.sec)})
-                              </span>
-                              <span className="font-mono font-semibold text-[#dce8f5]">
-                                {ts.numerator}/{ts.denominator}
-                              </span>
-                            </button>
-                          ))
-                        )}
-                      </div>
-                    </div>
-
-                    {/* MIDI Channels & Program Changes */}
-                    {perf.channels.length > 0 && (
-                      <div className="pt-1 space-y-1">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
-                          MIDI-Kanäle &amp; Program Changes
-                        </div>
-                        <div className="space-y-1">
-                          {perf.channels.map((ch) => (
-                            <div
-                              key={ch.channel}
-                              className="flex flex-wrap items-center gap-x-2 gap-y-0.5 px-2 py-1 rounded bg-[#181e26] border border-[#252e3a]"
-                            >
-                              <span className="font-mono font-semibold text-[#cde7fb]">
-                                Ch {ch.channel + 1}
-                                {ch.isDrum ? ' (Drums)' : ''}
-                              </span>
-                              <span className="font-mono text-[11px] text-[#8b98a8]">
-                                {ch.noteCount} Noten
-                              </span>
-                              {ch.programs.length > 0 && (
-                                <span className="text-[11px] text-[#7be090]">
-                                  ·{' '}
-                                  {ch.programs
-                                    .map((p) => `#${p + 1} ${getGmProgramName(p)}`)
-                                    .join(', ')}
-                                </span>
-                              )}
-                              {(ch.ccCount > 0 || ch.pitchBendCount > 0 || ch.aftertouchCount > 0) && (
-                                <span className="font-mono text-[10px] text-[#7c8c9e]">
-                                  (
-                                  {[
-                                    ch.ccCount > 0 ? `CC ${ch.ccCount}` : null,
-                                    ch.pitchBendCount > 0 ? `PB ${ch.pitchBendCount}` : null,
-                                    ch.aftertouchCount > 0 ? `AT ${ch.aftertouchCount}` : null,
-                                  ]
-                                    .filter(Boolean)
-                                    .join(' · ')}
-                                  )
-                                </span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Column 2: CC, Pitch Bend, Aftertouch & Time-based Events */}
-                  <div className="space-y-2.5">
-                    {(ccGroups.length > 0 ||
-                      perf.pitchBends.length > 0 ||
-                      perf.aftertouch.length > 0) && (
-                      <div className="space-y-1.5">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
-                          CC, Pitch Bend &amp; Aftertouch
-                        </div>
-                        <div className="space-y-1">
-                          {ccGroups.map((grp) => (
-                            <button
-                              key={grp.controller}
-                              type="button"
-                              onClick={() => onSeek(grp.firstSec)}
-                              className="w-full text-left flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#181e26] hover:bg-[#1e2630] border border-[#252e3a] transition-colors"
-                              title="Klicken, um zum ersten Event dieses Controllers zu springen"
-                            >
-                              <span className="text-[#d6e2ee] truncate">
-                                <span className="font-mono text-[#7cc4f0]">CC {grp.controller}</span>{' '}
-                                · {grp.label}
-                              </span>
-                              <span className="font-mono text-[11px] text-[#8d9cb0] whitespace-nowrap shrink-0">
-                                {grp.count}× · Werte {grp.minVal}–{grp.maxVal}
-                              </span>
-                            </button>
-                          ))}
-
-                          {perf.pitchBends.length > 0 && pbRange && (
-                            <button
-                              type="button"
-                              onClick={() => onSeek(perf.pitchBends[0].sec)}
-                              className="w-full text-left flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#181e26] hover:bg-[#1e2630] border border-[#252e3a] transition-colors"
-                              title="Klicken, um zum ersten Pitch-Bend-Event zu springen"
-                            >
-                              <span className="text-[#f0cf85]">Pitch Bend (14-Bit)</span>
-                              <span className="font-mono text-[11px] text-[#8d9cb0] whitespace-nowrap shrink-0">
-                                {perf.pitchBends.length}× · {pbRange.min} bis {pbRange.max}
-                              </span>
-                            </button>
-                          )}
-
-                          {perf.aftertouch.length > 0 && (
-                            <button
-                              type="button"
-                              onClick={() => onSeek(perf.aftertouch[0].sec)}
-                              className="w-full text-left flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#181e26] hover:bg-[#1e2630] border border-[#252e3a] transition-colors"
-                              title="Klicken, um zum ersten Aftertouch-Event zu springen"
-                            >
-                              <span className="text-[#cfa4f5]">
-                                Aftertouch (
-                                {perf.aftertouch.some((a) => a.kind === 'poly') &&
-                                perf.aftertouch.some((a) => a.kind === 'channel')
-                                  ? 'Channel + Poly'
-                                  : perf.aftertouch.some((a) => a.kind === 'poly')
-                                  ? 'Polyphon'
-                                  : 'Channel Pressure'}
-                                )
-                              </span>
-                              <span className="font-mono text-[11px] text-[#8d9cb0] whitespace-nowrap shrink-0">
-                                {perf.aftertouch.length}× · Max {maxAftertouch}
-                              </span>
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {(md.markers.length > 0 ||
-                      md.cues.length > 0 ||
-                      md.textEvents.length > 0 ||
-                      md.lyrics.length > 0) && (
-                      <div className="space-y-1.5">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-[#728296]">
-                          Zeitbezogene Events (Marker, Text, Cue, Lyrics)
-                        </div>
-                        <div className="space-y-1">
-                          {[...md.markers, ...md.cues, ...md.textEvents, ...md.lyrics]
-                            .sort((a, b) => a.tick - b.tick)
-                            .map((ev, idx) => {
-                              const typeLabel =
-                                ev.type === 'marker'
-                                  ? 'Marker'
-                                  : ev.type === 'cue'
-                                  ? 'Cue'
-                                  : ev.type === 'lyric'
-                                  ? 'Lyric'
-                                  : 'Text';
-                              const typeColor =
-                                ev.type === 'marker'
-                                  ? 'text-[#f3cf7a]'
-                                  : ev.type === 'cue'
-                                  ? 'text-[#5fd4c2]'
-                                  : 'text-[#8fc8e8]';
-
-                              return (
-                                <button
-                                  key={`${ev.type}-${ev.tick}-${idx}`}
-                                  type="button"
-                                  onClick={() => onSeek(ev.sec)}
-                                  className="w-full text-left flex items-baseline gap-2 px-1.5 py-0.5 rounded hover:bg-[#1e252e] transition-colors"
-                                  title="Klicken, um zu dieser Stelle zu springen"
-                                >
-                                  <span className="font-mono tabular-nums text-[11px] text-[#7c8a9b] shrink-0">
-                                    T{formatTickBar(ev.tick)} · {formatDuration(ev.sec)}
-                                  </span>
-                                  <span className={`font-mono text-[11px] shrink-0 w-12 ${typeColor}`}>
-                                    {typeLabel}
-                                  </span>
-                                  <span className="text-[#d6dfe9] break-words">{ev.text}</span>
-                                </button>
-                              );
-                            })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })()}
-
-      {/* Duplicate / Variant Comparison Strip */}
-      {duplicateInfo && duplicateInfo.peers.length > 0 && (() => {
-        const stripLabel =
-          duplicateInfo.kind === 'byte_exact'
-            ? 'Byte-identisches Duplikat (SHA-256 · 100%)'
-            : duplicateInfo.kind === 'note_exact'
-            ? 'Noten-identisches Duplikat (100% · anderer Header/Vorlauf)'
-            : `Musikalische Variante (${duplicateInfo.similarity}%)`;
-
-        const stripColor =
-          duplicateInfo.kind === 'byte_exact'
-            ? 'text-amber-300'
-            : duplicateInfo.kind === 'note_exact'
-            ? 'text-sky-300'
-            : 'text-violet-300';
-
-        return (
-          <div className="px-4 py-1.5 bg-[#1b1f27] border-b border-[#2b313a] flex flex-wrap items-center gap-2 text-xs shrink-0">
-            <span className={`inline-flex items-center gap-1.5 font-medium shrink-0 ${stripColor}`}>
-              <Copy className="w-3.5 h-3.5" />
-              Gruppe #{duplicateInfo.groupId} · {stripLabel}
-            </span>
-            <span className="text-[#6f7885]">·</span>
-            <span className="text-[11px] text-[#8d96a4]">Vergleichen mit:</span>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {duplicateInfo.peers.map((peer) => {
-                const peerTag =
-                  peer.matchType === 'byte_exact'
-                    ? 'SHA'
-                    : peer.matchType === 'note_exact'
-                    ? 'Noten='
-                    : `${peer.similarity}%`;
-                const peerTagColor =
-                  peer.matchType === 'byte_exact'
-                    ? 'text-amber-300'
-                    : peer.matchType === 'note_exact'
-                    ? 'text-sky-300'
-                    : 'text-violet-300';
-
-                return (
-                  <button
-                    key={peer.id}
-                    type="button"
-                    onClick={() => onSelectEntry?.(peer.id)}
-                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-[#232933] hover:bg-[#2d3542] border border-[#343d4b] text-[11px] text-[#d6dfeb] transition-colors whitespace-nowrap"
-                    title={`Zu ${peer.name} springen · ${peer.reason}`}
-                  >
-                    <span className="truncate max-w-[180px]">
-                      {peer.name.replace(/\.(mid|midi)$/i, '')}
-                    </span>
-                    <span className={`font-mono text-[10px] ${peerTagColor}`}>{peerTag}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* Interactive Trim Control Strip */}
+      {/* Interactive Trim Control Strip (only shown when Trim mode is active) */}
       {trimMode && parsed && (() => {
         const startBar = tickToBarFraction(barGrid, trimStartTick).toFixed(1).replace('.0', '');
         const endTickVal = trimEndTick ?? parsed.totalTicks;
@@ -2382,29 +1596,6 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
               </button>
             )}
           </div>
-        </div>
-      )}
-
-      {/* Diagnostic Issues Strip (only shown if parser found completeness problems) */}
-      {parsed && parsed.issues.length > 0 && (
-        <div
-          className={`px-4 py-2 border-b flex flex-wrap items-center gap-x-4 gap-y-1 text-xs shrink-0 ${
-            parsed.hasErrors
-              ? 'bg-rose-950/35 border-rose-900/50 text-rose-200'
-              : 'bg-amber-950/30 border-amber-900/40 text-amber-200'
-          }`}
-        >
-          {parsed.issues.map((issue) => (
-            <div key={issue.code} className="flex items-center gap-1.5" title={issue.detail}>
-              {issue.severity === 'error' ? (
-                <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-              ) : (
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              )}
-              <span className="font-medium">{issue.label}:</span>
-              <span className="opacity-85">{issue.detail}</span>
-            </div>
-          ))}
         </div>
       )}
 
@@ -2719,59 +1910,207 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
           )}
 
           {/* Web MIDI Output Selector (e.g. loopMIDI -> Kontakt 8 Standalone) */}
-          <div className="flex items-center gap-1.5">
-            <div
-              className={`flex items-center rounded border transition-colors ${
-                playback.selectedMidiOutputId
-                  ? 'bg-[#1d2b38] border-[#4ea1d3]/65'
-                  : 'bg-[#22272f] border-[#313844]'
-              }`}
-              title={
-                playback.midiError ||
-                'MIDI-Ausgang wählen (z. B. loopMIDI Port für Native Instruments Kontakt 8 Standalone)'
-              }
-            >
-              <span
-                className={`pl-2 pr-1 flex items-center ${
-                  playback.selectedMidiOutputId ? 'text-[#5eb1e6]' : 'text-[#7d8694]'
-                }`}
-                aria-hidden="true"
-              >
-                <Cable className="w-3.5 h-3.5" />
-              </span>
-              <select
-                value={playback.selectedMidiOutputId ?? ''}
-                onChange={(e) => onSelectMidiOutput(e.target.value || null)}
-                className={`bg-transparent py-1 pr-2 text-xs focus:outline-none max-w-[165px] cursor-pointer ${
+            <div className="flex items-center gap-1.5">
+              {/* Hidden .sf2 file input */}
+              <input
+                ref={sf2InputRef}
+                type="file"
+                accept=".sf2,.SF2"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) onLoadSoundFont(f);
+                  e.target.value = '';
+                }}
+              />
+
+              <div
+                className={`flex items-center rounded border transition-colors ${
                   playback.selectedMidiOutputId
-                    ? 'text-[#d8ecfa] font-medium'
-                    : 'text-[#cfd5de]'
+                    ? 'bg-[#1d2b38] border-[#4ea1d3]/65'
+                    : 'bg-[#22272f] border-[#313844]'
                 }`}
-                aria-label="MIDI-Ausgang"
-              >
-                <option value="" className="bg-[#1c2026] text-[#cfd5de]">
-                  Browser-Synth
-                </option>
-                {playback.midiOutputs.map((out) => (
-                  <option key={out.id} value={out.id} className="bg-[#1c2026] text-[#eef1f5]">
-                    {out.name}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={onRefreshMidiOutputs}
-                className="p-1.5 text-[#8b94a1] hover:text-white border-l border-[#313844] transition-colors"
                 title={
-                  playback.midiError
-                    ? `MIDI-Geräte neu suchen (${playback.midiError})`
-                    : 'MIDI-Ausgänge neu scannen'
+                  playback.midiError ||
+                  'Audio-/MIDI-Ausgang wählen (Interner Sound / SoundFont oder externer MIDI-Port wie loopMIDI -> Kontakt 8)'
                 }
-                aria-label="MIDI-Ausgänge aktualisieren"
               >
-                <RefreshCw className="w-3 h-3" />
-              </button>
-            </div>
+                <span
+                  className={`pl-2 pr-1 flex items-center ${
+                    playback.selectedMidiOutputId ? 'text-[#5eb1e6]' : 'text-[#7d8694]'
+                  }`}
+                  aria-hidden="true"
+                >
+                  <Cable className="w-3.5 h-3.5" />
+                </span>
+                <select
+                  value={playback.selectedMidiOutputId ?? ''}
+                  onChange={(e) => onSelectMidiOutput(e.target.value || null)}
+                  className={`bg-transparent py-1 pr-2 text-xs focus:outline-none max-w-[140px] cursor-pointer ${
+                    playback.selectedMidiOutputId
+                      ? 'text-[#d8ecfa] font-medium'
+                      : 'text-[#cfd5de]'
+                  }`}
+                  aria-label="Audio- oder MIDI-Ausgang"
+                >
+                  <option value="" className="bg-[#1c2026] text-[#cfd5de]">
+                    {playback.sf2Loaded ? 'SoundFont (.sf2)' : 'Browser-Synth'}
+                  </option>
+                  {playback.midiOutputs.map((out) => (
+                    <option key={out.id} value={out.id} className="bg-[#1c2026] text-[#eef1f5]">
+                      {out.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={onRefreshMidiOutputs}
+                  className="p-1.5 text-[#8b94a1] hover:text-white border-l border-[#313844] transition-colors"
+                  title={
+                    playback.midiError
+                      ? `MIDI-Geräte neu suchen (${playback.midiError})`
+                      : 'MIDI-Ausgänge neu scannen'
+                  }
+                  aria-label="MIDI-Ausgänge aktualisieren"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                </button>
+              </div>
+
+              {/* SoundFont (.sf2) Library Dropdown, Preset Picker & Hall Reverb when internal audio is active */}
+              {!playback.selectedMidiOutputId && (
+                <>
+                  {/* SoundFont Bank Selector (public/soundfonts/ + Browser-Synth + Custom Upload) */}
+                  <div
+                    className={`flex items-center rounded border transition-colors ${
+                      playback.sf2Loaded
+                        ? 'bg-[#1c2832] border-[#4ea1d3]/55'
+                        : 'bg-[#22272f] border-[#313844]'
+                    }`}
+                    title="SoundFont aus public/soundfonts/ auswählen oder eigene .sf2-Datei laden"
+                  >
+                    <span
+                      className={`pl-2 pr-1 flex items-center ${
+                        playback.sf2Loaded ? 'text-[#6bc0f2]' : 'text-[#8390a0]'
+                      }`}
+                      aria-hidden="true"
+                    >
+                      <Music className="w-3.5 h-3.5" />
+                    </span>
+                    <select
+                      disabled={playback.sf2Loading}
+                      value={playback.sf2SelectedSourceId}
+                      onChange={(e) => onSelectSoundFontSource(e.target.value)}
+                      className={`bg-transparent py-1 pr-1.5 text-xs focus:outline-none max-w-[160px] cursor-pointer disabled:opacity-50 ${
+                        playback.sf2Loaded ? 'text-[#dceeff] font-medium' : 'text-[#cfd5de]'
+                      }`}
+                      aria-label="SoundFont auswählen"
+                    >
+                      <option value="" className="bg-[#1c2026] text-[#cfd5de]">
+                        {playback.sf2Loading
+                          ? 'Lade SoundFont...'
+                          : playback.sf2Library.length > 0
+                          ? 'Browser-Synth'
+                          : 'Kein .sf2 (Synth)'}
+                      </option>
+                      {playback.sf2Library.length > 0 && (
+                        <optgroup label="Ordner: public/soundfonts" className="bg-[#1c2026] text-[#9fb2c7]">
+                          {playback.sf2Library.map((sf) => (
+                            <option
+                              key={sf.id}
+                              value={sf.id}
+                              className="bg-[#1c2026] text-[#eef1f5]"
+                            >
+                              {sf.label}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {playback.sf2CustomName && (
+                        <option value="custom" className="bg-[#1c2026] text-[#a7f3d0]">
+                          ★ {playback.sf2CustomName.replace(/\.sf2$/i, '')}
+                        </option>
+                      )}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={onRefreshSoundFontLibrary}
+                      className="p-1.5 text-[#8b96a6] hover:text-white border-l border-[#313b47] transition-colors"
+                      title="Ordner public/soundfonts/ nach neuen .sf2-Dateien durchsuchen"
+                      aria-label="SoundFont-Ordner neu scannen"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => sf2InputRef.current?.click()}
+                      className="p-1.5 text-[#8cb8d6] hover:text-white border-l border-[#313b47] transition-colors"
+                      title="Einzelne .sf2-Datei von einem anderen Ordner laden"
+                      aria-label="Eigene SoundFont-Datei laden"
+                    >
+                      <Upload className="w-3 h-3" />
+                    </button>
+                    {playback.sf2SelectedSourceId === 'custom' && (
+                      <button
+                        type="button"
+                        onClick={onUnloadSoundFont}
+                        className="p-1.5 text-[#8b96a6] hover:text-rose-300 border-l border-[#313b47] transition-colors"
+                        title="Manuell geladenes SoundFont entfernen"
+                        aria-label="Manuelles SoundFont entfernen"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Preset Dropdown inside the active SoundFont (shown if >1 preset) */}
+                  {playback.sf2Loaded && playback.sf2Presets.length > 1 && (
+                    <select
+                      value={playback.sf2SelectedPresetId ?? ''}
+                      onChange={(e) => onSelectSf2Preset(e.target.value || null)}
+                      className="px-2 py-1 rounded text-xs bg-[#1c232c] border border-[#314050] text-[#d6e9fa] focus:outline-none focus:border-[#4ea1d3] max-w-[155px] cursor-pointer"
+                      title="Klang-Preset innerhalb des geladenen SoundFonts wählen (Auto erkennt GM & Spurnamen)"
+                      aria-label="SoundFont-Preset"
+                    >
+                      <option value="" className="bg-[#1c2026] text-[#dceeff]">
+                        Auto (GM / Spur)
+                      </option>
+                      {playback.sf2Presets.map((p) => (
+                        <option
+                          key={p.id}
+                          value={p.id}
+                          className="bg-[#1c2026] text-[#eef1f5]"
+                        >
+                          {p.bank === 128 ? 'Drums' : String(p.preset).padStart(3, '0')} · {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={onToggleReverb}
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium border transition-colors whitespace-nowrap ${
+                      playback.reverbEnabled
+                        ? 'bg-[#222f3c] border-[#4ea1d3]/55 text-[#cce7fb]'
+                        : 'bg-[#22272f] border-[#313844] text-[#8a94a2] hover:text-white'
+                    }`}
+                    title="Leichten Raumhall (Reverb) für angenehmeres Vorhören ein-/ausschalten"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    Hall
+                  </button>
+
+                  {playback.sf2Error && (
+                    <span
+                      className="inline-flex items-center text-amber-400"
+                      title={playback.sf2Error}
+                    >
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                    </span>
+                  )}
+                </>
+              )}
 
             {playback.selectedMidiOutputId && (
               <>
@@ -2856,23 +2195,6 @@ export const MidiPianoRoll: React.FC<MidiPianoRollProps> = ({
             <Trash2 className="w-3.5 h-3.5" />
             Aussortieren (X)
           </button>
-
-          {canWriteToDisk && onImmediateMoveToSorted && (
-            <button
-              type="button"
-              disabled={protectOriginals}
-              onClick={() => onImmediateMoveToSorted(entry)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-rose-700/80 hover:bg-rose-600 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-colors whitespace-nowrap"
-              title={
-                protectOriginals
-                  ? 'Originalschutz aktiv – Verschieben auf der Festplatte gesperrt'
-                  : 'Datei sofort in den Unterordner _Aussortiert verschieben'
-              }
-            >
-              {protectOriginals && <Lock className="w-3 h-3" />}
-              Sofort verschieben
-            </button>
-          )}
         </div>
       </div>
     </div>

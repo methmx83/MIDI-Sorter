@@ -2,28 +2,29 @@ import React, { useEffect, useState } from 'react';
 import { Check, Copy, Download, FileText, RotateCcw, Save, X } from 'lucide-react';
 import type { MidiFileEntry } from '../types/midi';
 import type { LibraryAbbreviation } from '../utils/abbreviationProfile';
+import type { MetadataPresetProfile, PresetCategoryKey } from '../utils/metadataPresets';
 import { downloadTextFile } from '../utils/fileSystem';
+import { serializeMetadataSidecarTxt } from '../utils/metadataSidecar';
 import {
   buildTrainingTxtDraft,
   serializeTrainingTxt,
   type TrainingTxtDraft,
 } from '../utils/trainingTxtGenerator';
+import { PresetMultiSelect, PresetSingleSelect } from './PresetSelectControls';
 
 interface TrainingTxtModalProps {
   isOpen: boolean;
   entry: MidiFileEntry | null;
   canWriteToDisk: boolean;
   abbreviations: LibraryAbbreviation[];
+  metadataPresets: MetadataPresetProfile;
+  onAddMetadataPreset: (category: PresetCategoryKey, value: string, abbr?: string) => void;
+  onOpenPresetsManager?: () => void;
   onOpenAbbreviationProfile?: () => void;
   onClose: () => void;
   onSaveToDisk: (entry: MidiFileEntry, filename: string, content: string) => Promise<string>;
+  onSidecarSaved?: (entryId: string, rawTxt: string) => void;
 }
-
-const splitCsv = (val: string): string[] =>
-  val
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
 
 const splitLines = (val: string): string[] =>
   val
@@ -36,9 +37,13 @@ export const TrainingTxtModal: React.FC<TrainingTxtModalProps> = ({
   entry,
   canWriteToDisk,
   abbreviations,
+  metadataPresets,
+  onAddMetadataPreset,
+  onOpenPresetsManager,
   onOpenAbbreviationProfile,
   onClose,
   onSaveToDisk,
+  onSidecarSaved,
 }) => {
   const [draft, setDraft] = useState<TrainingTxtDraft | null>(null);
   const [rawText, setRawText] = useState<string>('');
@@ -48,11 +53,31 @@ export const TrainingTxtModal: React.FC<TrainingTxtModalProps> = ({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const serializeFromDraft = (targetEntry: MidiFileEntry, nextDraft: TrainingTxtDraft): string => {
+    if (targetEntry.datasetMeta) {
+      return serializeMetadataSidecarTxt(targetEntry, {
+        ...targetEntry.datasetMeta,
+        title: nextDraft.titel,
+        workStatus: nextDraft.status,
+        genre: nextDraft.hauptstil,
+        subgenres: nextDraft.substil,
+        moods: nextDraft.stimmung,
+        rating: nextDraft.meineBewertung,
+        whyILike: nextDraft.warumMagIch,
+        specialFeatures: nextDraft.besondereMerkmale,
+        importantTracks: nextDraft.wichtigeSpuren,
+        sections: nextDraft.abschnitte,
+        libraryAbbreviations: nextDraft.libraryAbkuerzungen,
+      });
+    }
+    return serializeTrainingTxt(nextDraft);
+  };
+
   useEffect(() => {
     if (!isOpen || !entry) return;
     const initial = buildTrainingTxtDraft(entry, abbreviations);
     setDraft(initial);
-    setRawText(serializeTrainingTxt(initial));
+    setRawText(serializeFromDraft(entry, initial));
     setManualRawEdited(false);
     setCopied(false);
     setStatusMessage(null);
@@ -65,7 +90,7 @@ export const TrainingTxtModal: React.FC<TrainingTxtModalProps> = ({
     setDraft((prev) => {
       if (!prev) return prev;
       const next = updater(prev);
-      setRawText(serializeTrainingTxt(next));
+      setRawText(serializeFromDraft(entry, next));
       setManualRawEdited(false);
       return next;
     });
@@ -94,6 +119,7 @@ export const TrainingTxtModal: React.FC<TrainingTxtModalProps> = ({
     setErrorMessage(null);
     try {
       const savedName = await onSaveToDisk(entry, targetFilename, rawText);
+      onSidecarSaved?.(entry.id, rawText);
       setStatusMessage(`Gespeichert als „${savedName}“ direkt neben der MIDI-Datei.`);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Speichern fehlgeschlagen.');
@@ -145,37 +171,31 @@ export const TrainingTxtModal: React.FC<TrainingTxtModalProps> = ({
                 />
               </label>
 
-              <label className="space-y-1 block">
-                <span className="text-[#98a3b3] font-medium">Status</span>
-                <select
+              <div className="space-y-1">
+                <span className="text-[#98a3b3] font-medium block">Status</span>
+                <PresetSingleSelect
                   value={draft.status}
-                  onChange={(e) =>
-                    updateDraft((d) => ({ ...d, status: e.target.value }))
-                  }
-                  className="w-full px-2.5 py-1.5 rounded bg-[#13171b] border border-[#2f3742] text-[#e6ecf4] focus:outline-none focus:border-[#4ea1d3]"
-                >
-                  <option value="final">final</option>
-                  <option value="skizze">skizze</option>
-                  <option value="idee">idee</option>
-                  <option value="wip">wip</option>
-                  <option value="unvollständig">unvollständig</option>
-                </select>
-              </label>
+                  options={metadataPresets.workStatuses}
+                  onChange={(val) => updateDraft((d) => ({ ...d, status: val }))}
+                  onAddPreset={(val) => onAddMetadataPreset('workStatuses', val)}
+                  placeholder="Status wählen…"
+                  searchPlaceholder="Status suchen oder eingeben…"
+                />
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              <label className="space-y-1 block">
-                <span className="text-[#98a3b3] font-medium">Hauptstil</span>
-                <input
-                  type="text"
+              <div className="space-y-1">
+                <span className="text-[#98a3b3] font-medium block">Hauptstil (Genre)</span>
+                <PresetSingleSelect
                   value={draft.hauptstil}
-                  onChange={(e) =>
-                    updateDraft((d) => ({ ...d, hauptstil: e.target.value }))
-                  }
-                  placeholder="z. B. orchestral, piano, electronic"
-                  className="w-full px-2.5 py-1.5 rounded bg-[#13171b] border border-[#2f3742] text-[#e6ecf4] focus:outline-none focus:border-[#4ea1d3]"
+                  options={metadataPresets.genres}
+                  onChange={(val) => updateDraft((d) => ({ ...d, hauptstil: val }))}
+                  onAddPreset={(val) => onAddMetadataPreset('genres', val)}
+                  placeholder="Genre auswählen…"
+                  searchPlaceholder="Genre suchen oder eingeben…"
                 />
-              </label>
+              </div>
 
               <label className="space-y-1 block">
                 <span className="text-[#98a3b3] font-medium">
@@ -197,35 +217,31 @@ export const TrainingTxtModal: React.FC<TrainingTxtModalProps> = ({
               </label>
             </div>
 
-            <label className="space-y-1 block">
-              <span className="text-[#98a3b3] font-medium">
-                Substil (kommagetrennt)
-              </span>
-              <input
-                type="text"
-                value={draft.substil.join(', ')}
-                onChange={(e) =>
-                  updateDraft((d) => ({ ...d, substil: splitCsv(e.target.value) }))
-                }
-                placeholder="cinematic, dark, trailer"
-                className="w-full px-2.5 py-1.5 rounded bg-[#13171b] border border-[#2f3742] text-[#e6ecf4] focus:outline-none focus:border-[#4ea1d3]"
+            <div className="space-y-1">
+              <span className="text-[#98a3b3] font-medium block">Substil (Subgenre)</span>
+              <PresetMultiSelect
+                values={draft.substil}
+                options={metadataPresets.subgenres}
+                onChange={(vals) => updateDraft((d) => ({ ...d, substil: vals }))}
+                onAddPreset={(val) => onAddMetadataPreset('subgenres', val)}
+                placeholder="Subgenres auswählen…"
+                searchPlaceholder="Subgenre filtern oder hinzufügen…"
+                chipTone="sky"
               />
-            </label>
+            </div>
 
-            <label className="space-y-1 block">
-              <span className="text-[#98a3b3] font-medium">
-                Stimmung (kommagetrennt)
-              </span>
-              <input
-                type="text"
-                value={draft.stimmung.join(', ')}
-                onChange={(e) =>
-                  updateDraft((d) => ({ ...d, stimmung: splitCsv(e.target.value) }))
-                }
-                placeholder="düster, dramatisch, traurig"
-                className="w-full px-2.5 py-1.5 rounded bg-[#13171b] border border-[#2f3742] text-[#e6ecf4] focus:outline-none focus:border-[#4ea1d3]"
+            <div className="space-y-1">
+              <span className="text-[#98a3b3] font-medium block">Stimmung (Mood)</span>
+              <PresetMultiSelect
+                values={draft.stimmung}
+                options={metadataPresets.moods}
+                onChange={(vals) => updateDraft((d) => ({ ...d, stimmung: vals }))}
+                onAddPreset={(val) => onAddMetadataPreset('moods', val)}
+                placeholder="Moods auswählen…"
+                searchPlaceholder="Mood suchen (z. B. Dark, Epic)…"
+                chipTone="violet"
               />
-            </label>
+            </div>
 
             <label className="space-y-1 block">
               <span className="text-[#98a3b3] font-medium">
@@ -273,18 +289,32 @@ export const TrainingTxtModal: React.FC<TrainingTxtModalProps> = ({
                   : 'unbekannt'}
                 ) wurden automatisch ermittelt.
               </span>
-              {onOpenAbbreviationProfile && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onClose();
-                    onOpenAbbreviationProfile();
-                  }}
-                  className="text-[#7cc4f0] hover:underline whitespace-nowrap shrink-0"
-                >
-                  Kürzel-Profil
-                </button>
-              )}
+              <div className="flex items-center gap-2.5 shrink-0">
+                {onOpenPresetsManager && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenPresetsManager();
+                    }}
+                    className="text-[#7cc4f0] hover:underline whitespace-nowrap"
+                  >
+                    Presets
+                  </button>
+                )}
+                {onOpenAbbreviationProfile && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenAbbreviationProfile();
+                    }}
+                    className="text-[#7cc4f0] hover:underline whitespace-nowrap"
+                  >
+                    Kürzel-Profil
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
@@ -298,7 +328,7 @@ export const TrainingTxtModal: React.FC<TrainingTxtModalProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setRawText(serializeTrainingTxt(draft));
+                    setRawText(serializeFromDraft(entry, draft));
                     setManualRawEdited(false);
                   }}
                   className="inline-flex items-center gap-1 text-[11px] text-[#7cc4f0] hover:underline"

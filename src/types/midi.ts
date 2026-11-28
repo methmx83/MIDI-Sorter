@@ -199,6 +199,9 @@ export interface MidiFileEntry {
   file?: File;
   fileHandle?: FileSystemFileHandle;
   parentDirHandle?: FileSystemDirectoryHandle;
+  sidecarFile?: File;
+  sidecarHandle?: FileSystemFileHandle;
+  sidecarRelativePath?: string;
   parsed: ParsedMidi | null;
   parseError?: string;
   triage: TriageStatus;
@@ -206,4 +209,132 @@ export interface MidiFileEntry {
   originalBuffer?: ArrayBuffer;
   trimmedBuffer?: ArrayBuffer;
   isTrimmed?: boolean;
+  datasetMeta?: MidiDatasetMetadata;
+}
+
+export type MidiOrigin = 'eigenkomposition' | 'library' | 'unbekannt';
+
+export type MidiFileType =
+  | 'full_track'
+  | 'pattern'
+  | 'phrase'
+  | 'loop'
+  | 'einzelspur'
+  | 'unbekannt';
+
+export type BuiltinInstrumentFamily =
+  | 'strings'
+  | 'brass'
+  | 'woodwinds'
+  | 'keys'
+  | 'synth'
+  | 'guitar_plucked'
+  | 'bass'
+  | 'drums_percussion'
+  | 'choir_vocal'
+  | 'orchestra_ensemble'
+  | 'fx_other'
+  | 'unbekannt';
+
+export type InstrumentFamily = BuiltinInstrumentFamily | (string & {});
+
+export type BuiltinMusicalRole =
+  | 'melodie'
+  | 'gegenmelodie'
+  | 'harmonie'
+  | 'bass'
+  | 'percussion'
+  | 'ostinato_arp'
+  | 'arrangement'
+  | 'fx'
+  | 'unbekannt';
+
+export type MusicalRole = BuiltinMusicalRole | (string & {});
+
+export type MetadataReviewStatus = 'offen' | 'in_arbeit' | 'geprueft';
+
+export type FieldProvenance = 'auto' | 'manual';
+
+export type TrackableMetaField =
+  | 'origin'
+  | 'fileType'
+  | 'genre'
+  | 'subgenres'
+  | 'instrument'
+  | 'instrumentFamily'
+  | 'articulation'
+  | 'musicalRole'
+  | 'rating'
+  | 'triage'
+  | 'workStatus'
+  | 'moods';
+
+export interface MidiSourceLink {
+  midiFile: string;
+  metadataFile: string;
+  sha256: string | null;
+  originalFile?: string | null;
+  originalSha256?: string | null;
+  parentCompositionId?: string | null;
+  sourceTrackIndex?: number | null;
+  sourceTrackName?: string | null;
+  startTickOffset?: number | null;
+  segmentBars?: { fromBar: number; toBar: number } | null;
+}
+
+export interface MidiDatasetSection {
+  name: string;
+  vonTakt: number;
+  bisTakt: number;
+}
+
+export interface TrackMetadataEntry {
+  trackIndex: number;
+  trackName: string;
+  noteCount: number;
+  instrument: string;
+  instrumentFamily: InstrumentFamily;
+  articulation: string;
+  musicalRole: MusicalRole;
+  confirmed: boolean;
+}
+
+export interface MidiDatasetMetadata {
+  compositionId: string;
+  title: string;
+  origin: MidiOrigin;
+  fileType: MidiFileType;
+  isMultiTrackMeta?: boolean;
+  workStatus: string;
+  reviewStatus: MetadataReviewStatus;
+  genre: string;
+  subgenres: string[];
+  instrument: string;
+  instrumentFamily: InstrumentFamily;
+  articulation: string;
+  musicalRole: MusicalRole;
+  trackMetadata?: TrackMetadataEntry[];
+  rating: number | null; // 1..10 or null
+  moods: string[];
+  whyILike: string[];
+  specialFeatures: string[];
+  importantTracks: {
+    hauptmelodie: string[];
+    gegenmelodie: string[];
+    harmonie: string[];
+    bass: string[];
+    rhythmischesFundament: string[];
+  };
+  sections: MidiDatasetSection[];
+  libraryAbbreviations: Array<{ key: string; meaning: string }>;
+  keyOverride?: {
+    grundton: string;
+    modus: string;
+    sicherheit: string;
+  } | null;
+  fieldProvenance: Record<TrackableMetaField, FieldProvenance>;
+  sourceLink: MidiSourceLink;
+  sidecarLoaded: boolean;
+  sidecarDirty: boolean;
+  lastSavedAt?: string;
 }

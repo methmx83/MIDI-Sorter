@@ -1,5 +1,15 @@
 import type { MidiNote, ParsedMidi } from '../types/midi';
 import { getBpmAtSec, getTimeSigAtTick, secondsToTick } from './midiTimeline';
+import {
+  inferGmProgramFromTrackName,
+  Sf2WebAudioSynth,
+  type Sf2PresetInfo,
+} from './sf2Engine';
+import {
+  clearActiveSoundFontFromDb,
+  loadActiveSoundFontFromDb,
+  saveActiveSoundFontToDb,
+} from './sf2Storage';
 
 export interface WebMidiOutputDevice {
   id: string;
@@ -11,6 +21,14 @@ export interface WebMidiOutputDevice {
 export type MidiChannelRouting = 'ch1' | 'original';
 
 export type WebMidiStatus = 'uninitialized' | 'ready' | 'unsupported' | 'denied';
+
+export interface BundledSoundFontItem {
+  id: string; // "library:<filename>"
+  name: string;
+  label: string;
+  url: string;
+  sizeBytes: number;
+}
 
 export interface MidiPlaybackState {
   isPlaying: boolean;
@@ -31,6 +49,20 @@ export interface MidiPlaybackState {
   midiOutputs: WebMidiOutputDevice[];
   selectedMidiOutputId: string | null;
   midiChannelRouting: MidiChannelRouting;
+  // SoundFont (.sf2) & audio polish state
+  sf2Loaded: boolean;
+  sf2Loading: boolean;
+  sf2BankName: string | null;
+  sf2FileName: string | null;
+  sf2Presets: Sf2PresetInfo[];
+  sf2SelectedPresetId: string | null; // null = Auto (GM / Spur)
+  sf2Error: string | null;
+  sf2Library: BundledSoundFontItem[];
+  sf2SelectedSourceId: string; // '' = Browser-Synth, 'library:<file>', 'custom'
+  sf2CustomName: string | null;
+  reverbEnabled: boolean;
+  mutedTracks: Set<number>;
+  soloTracks: Set<number>;
 }
 
 type StateListener = (state: MidiPlaybackState) => void;
@@ -43,6 +75,59 @@ interface PendingMidiNoteOff {
 
 const LS_MIDI_OUTPUT_NAME_KEY = 'midi_sorter_midi_output_name_v1';
 const LS_MIDI_CHANNEL_ROUTING_KEY = 'midi_sorter_midi_channel_v1';
+const LS_REVERB_ENABLED_KEY = 'midi_sorter_reverb_enabled_v1';
+const LS_SF2_SOURCE_KEY = 'midi_sorter_sf2_source_v1';
+
+function loadSavedSf2Source(): string | null {
+  try {
+    return window.localStorage.getItem(LS_SF2_SOURCE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveSf2Source(sourceId: string): void {
+  try {
+    window.localStorage.setItem(LS_SF2_SOURCE_KEY, sourceId);
+  } catch {
+    // ignore
+  }
+}
+
+function loadSavedReverbPref(): boolean {
+  try {
+    return window.localStorage.getItem(LS_REVERB_ENABLED_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+function saveReverbPref(val: boolean): void {
+  try {
+    window.localStorage.setItem(LS_REVERB_ENABLED_KEY, String(val));
+  } catch {
+    // ignore
+  }
+}
+
+function createHallImpulseResponse(ctx: AudioContext, durationSec = 1.45, decay = 2.6): AudioBuffer {
+  const sr = ctx.sampleRate;
+  const length = Math.floor(sr * durationSec);
+  const impulse = ctx.createBuffer(2, length, sr);
+  for (let ch = 0; ch < 2; ch++) {
+    const data = impulse.getChannelData(ch);
+    let lp = 0;
+    for (let i = 0; i < length; i++) {
+      const env = Math.pow(1 - i / length, decay);
+      // Gentle pre-delay + smooth damped stereo noise
+      const preDelay = i < sr * 0.012 ? i / (sr * 0.012) : 1;
+      const white = Math.random() * 2 - 1;
+      lp = lp * 0.62 + white * 0.38;
+      data[i] = lp * env * preDelay * 0.55;
+    }
+  }
+  return impulse;
+}
 
 function loadSavedOutputName(): string | null {
   try {
@@ -85,6 +170,8 @@ function midiToFrequency(pitch: number): number {
 export class WebMidiPlayer {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
+  private synthBus: GainNode | null = null;
+  private reverbWetGain: GainNode | null = null;
   private midi: ParsedMidi | null = null;
   private isPlaying = false;
   private startContextTime = 0;
@@ -92,10 +179,28 @@ export class WebMidiPlayer {
   private nextNoteIdx = 0;
   private schedulerTimer: number | null = null;
   private rafId: number | null = null;
-  private volume = 0.7;
+  private volume = 0.75;
   private overrideBpm: number | null = null;
   private activeNodes: Set<AudioNode> = new Set();
   private listeners: Set<StateListener> = new Set();
+
+  // SoundFont (.sf2) engine state
+  private sf2 = new Sf2WebAudioSynth();
+  private sf2Loading = false;
+  private sf2BankName: string | null = null;
+  private sf2FileName: string | null = null;
+  private sf2Presets: Sf2PresetInfo[] = [];
+  private sf2SelectedPresetId: string | null = null;
+  private sf2Error: string | null = null;
+  private sf2Library: BundledSoundFontItem[] = [];
+  private sf2SelectedSourceId: string = '';
+  private sf2CustomName: string | null = null;
+  private sf2UrlBufferCache: Map<string, ArrayBuffer> = new Map();
+  private reverbEnabled: boolean = loadSavedReverbPref();
+  private trackProgramMap: Map<number, { program: number; isDrum: boolean }> = new Map();
+  private channelProgramMap: Map<number, number> = new Map();
+  private mutedTracks: Set<number> = new Set();
+  private soloTracks: Set<number> = new Set();
 
   // Web MIDI Output state
   private midiAccess: MIDIAccess | null = null;
@@ -116,14 +221,286 @@ export class WebMidiPlayer {
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       this.ctx = new AudioCtx();
+
+      // Master chain: synthBus -> (dry + hall reverb) -> soft limiter -> masterGain -> destination
+      this.synthBus = this.ctx.createGain();
+      this.synthBus.gain.value = 1.0;
+
+      const compressor = this.ctx.createDynamicsCompressor();
+      compressor.threshold.value = -8;
+      compressor.knee.value = 18;
+      compressor.ratio.value = 6;
+      compressor.attack.value = 0.004;
+      compressor.release.value = 0.16;
+
       this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.value = this.volume * 0.45;
+      this.masterGain.gain.value = this.volume * 0.72;
+
+      const dryGain = this.ctx.createGain();
+      dryGain.gain.value = 0.95;
+
+      const convolver = this.ctx.createConvolver();
+      convolver.buffer = createHallImpulseResponse(this.ctx);
+
+      this.reverbWetGain = this.ctx.createGain();
+      this.reverbWetGain.gain.value = this.reverbEnabled ? 0.24 : 0.0;
+
+      this.synthBus.connect(dryGain);
+      dryGain.connect(compressor);
+
+      this.synthBus.connect(convolver);
+      convolver.connect(this.reverbWetGain);
+      this.reverbWetGain.connect(compressor);
+
+      compressor.connect(this.masterGain);
       this.masterGain.connect(this.ctx.destination);
     }
     if (this.ctx.state === 'suspended') {
       void this.ctx.resume();
     }
     return this.ctx;
+  }
+
+  async refreshSoundFontLibrary(): Promise<BundledSoundFontItem[]> {
+    try {
+      let res = await fetch('/api/soundfonts', { cache: 'no-store' });
+      if (!res.ok) {
+        res = await fetch('/soundfonts/manifest.json', { cache: 'no-store' });
+      }
+      if (res.ok) {
+        const data = (await res.json()) as { files?: BundledSoundFontItem[] };
+        if (Array.isArray(data.files)) {
+          this.sf2Library = data.files;
+          this.emit();
+          return this.sf2Library;
+        }
+      }
+    } catch {
+      // Ignore if offline or endpoint unavailable
+    }
+    return this.sf2Library;
+  }
+
+  private async loadBundledSoundFont(item: BundledSoundFontItem): Promise<void> {
+    this.sf2Loading = true;
+    this.sf2Error = null;
+    this.emit();
+    try {
+      let buffer = this.sf2UrlBufferCache.get(item.url);
+      if (!buffer) {
+        const res = await fetch(item.url);
+        if (!res.ok) {
+          throw new Error(`SoundFont „${item.name}“ konnte nicht geladen werden (${res.status}).`);
+        }
+        buffer = await res.arrayBuffer();
+        this.sf2UrlBufferCache.set(item.url, buffer);
+      }
+      const info = this.sf2.loadBuffer(buffer, item.name);
+      this.sf2BankName = info.bankName;
+      this.sf2FileName = info.fileName;
+      this.sf2Presets = info.presets;
+      this.sf2SelectedPresetId = info.presets.length === 1 ? info.presets[0].id : null;
+      this.sf2SelectedSourceId = item.id;
+      this.sf2Error = null;
+      saveSf2Source(item.id);
+    } catch (err) {
+      this.sf2Error =
+        err instanceof Error ? err.message : 'SoundFont (.sf2) konnte nicht geladen werden.';
+    } finally {
+      this.sf2Loading = false;
+      this.emit();
+    }
+  }
+
+  async initSavedSoundFont(): Promise<void> {
+    this.sf2Loading = true;
+    this.emit();
+    try {
+      const [library, storedCustom] = await Promise.all([
+        this.refreshSoundFontLibrary(),
+        loadActiveSoundFontFromDb(),
+      ]);
+      this.sf2CustomName = storedCustom?.name ?? null;
+
+      const savedSource = loadSavedSf2Source();
+
+      // 1. Respect explicit "Browser-Synth" selection
+      if (savedSource === 'none') {
+        this.sf2SelectedSourceId = '';
+        return;
+      }
+
+      // 2. Restore previously chosen SoundFont from public/soundfonts/
+      if (savedSource && savedSource.startsWith('library:')) {
+        const match = library.find((f) => f.id === savedSource);
+        if (match) {
+          await this.loadBundledSoundFont(match);
+          return;
+        }
+      }
+
+      // 3. Restore previously uploaded custom SoundFont from IndexedDB
+      if (savedSource === 'custom' && storedCustom) {
+        const info = this.sf2.loadBuffer(storedCustom.buffer, storedCustom.name);
+        this.sf2BankName = info.bankName;
+        this.sf2FileName = info.fileName;
+        this.sf2Presets = info.presets;
+        this.sf2SelectedPresetId = info.presets.length === 1 ? info.presets[0].id : null;
+        this.sf2SelectedSourceId = 'custom';
+        this.sf2Error = null;
+        return;
+      }
+
+      // 4. Default on first visit: auto-load first SoundFont from public/soundfonts/ if present, else custom DB
+      if (library.length > 0) {
+        await this.loadBundledSoundFont(library[0]);
+      } else if (storedCustom) {
+        const info = this.sf2.loadBuffer(storedCustom.buffer, storedCustom.name);
+        this.sf2BankName = info.bankName;
+        this.sf2FileName = info.fileName;
+        this.sf2Presets = info.presets;
+        this.sf2SelectedPresetId = info.presets.length === 1 ? info.presets[0].id : null;
+        this.sf2SelectedSourceId = 'custom';
+        this.sf2Error = null;
+      }
+    } catch (err) {
+      this.sf2Error =
+        err instanceof Error ? err.message : 'Gespeichertes SoundFont konnte nicht geladen werden.';
+    } finally {
+      this.sf2Loading = false;
+      this.emit();
+    }
+  }
+
+  async selectSoundFontSource(sourceId: string): Promise<void> {
+    if (!sourceId) {
+      this.sf2.unload();
+      this.sf2BankName = null;
+      this.sf2FileName = null;
+      this.sf2Presets = [];
+      this.sf2SelectedPresetId = null;
+      this.sf2SelectedSourceId = '';
+      this.sf2Error = null;
+      saveSf2Source('none');
+      this.emit();
+      return;
+    }
+
+    if (sourceId.startsWith('library:')) {
+      const item = this.sf2Library.find((f) => f.id === sourceId);
+      if (item) {
+        await this.loadBundledSoundFont(item);
+      }
+      return;
+    }
+
+    if (sourceId === 'custom') {
+      this.sf2Loading = true;
+      this.sf2Error = null;
+      this.emit();
+      try {
+        const stored = await loadActiveSoundFontFromDb();
+        if (stored) {
+          const info = this.sf2.loadBuffer(stored.buffer, stored.name);
+          this.sf2BankName = info.bankName;
+          this.sf2FileName = info.fileName;
+          this.sf2Presets = info.presets;
+          this.sf2SelectedPresetId = info.presets.length === 1 ? info.presets[0].id : null;
+          this.sf2SelectedSourceId = 'custom';
+          this.sf2CustomName = stored.name;
+          saveSf2Source('custom');
+        }
+      } catch (err) {
+        this.sf2Error =
+          err instanceof Error ? err.message : 'SoundFont konnte nicht geladen werden.';
+      } finally {
+        this.sf2Loading = false;
+        this.emit();
+      }
+    }
+  }
+
+  async loadSoundFontFile(file: File): Promise<void> {
+    this.sf2Loading = true;
+    this.sf2Error = null;
+    this.emit();
+    try {
+      const buffer = await file.arrayBuffer();
+      const info = this.sf2.loadBuffer(buffer, file.name);
+      this.sf2BankName = info.bankName;
+      this.sf2FileName = info.fileName;
+      this.sf2Presets = info.presets;
+      this.sf2SelectedPresetId = info.presets.length === 1 ? info.presets[0].id : null;
+      this.sf2SelectedSourceId = 'custom';
+      this.sf2CustomName = file.name;
+      this.sf2Error = null;
+      saveSf2Source('custom');
+      void saveActiveSoundFontToDb(file.name, buffer);
+    } catch (err) {
+      this.sf2Error =
+        err instanceof Error ? err.message : 'SoundFont (.sf2) konnte nicht geladen werden.';
+    } finally {
+      this.sf2Loading = false;
+      this.emit();
+    }
+  }
+
+  unloadSoundFont(): void {
+    this.sf2.unload();
+    this.sf2BankName = null;
+    this.sf2FileName = null;
+    this.sf2Presets = [];
+    this.sf2SelectedPresetId = null;
+    this.sf2SelectedSourceId = '';
+    this.sf2CustomName = null;
+    this.sf2Error = null;
+    saveSf2Source('none');
+    void clearActiveSoundFontFromDb();
+    this.emit();
+  }
+
+  setSf2Preset(presetId: string | null): void {
+    this.sf2SelectedPresetId = presetId && presetId.trim() ? presetId : null;
+    this.emit();
+  }
+
+  setReverbEnabled(enabled: boolean): void {
+    this.reverbEnabled = enabled;
+    saveReverbPref(enabled);
+    if (this.reverbWetGain && this.ctx) {
+      this.reverbWetGain.gain.setTargetAtTime(enabled ? 0.24 : 0.0, this.ctx.currentTime, 0.03);
+    }
+    this.emit();
+  }
+
+  toggleTrackMute(trackIndex: number): void {
+    const next = new Set(this.mutedTracks);
+    if (next.has(trackIndex)) next.delete(trackIndex);
+    else next.add(trackIndex);
+    this.mutedTracks = next;
+    this.emit();
+  }
+
+  toggleTrackSolo(trackIndex: number): void {
+    const next = new Set(this.soloTracks);
+    if (next.has(trackIndex)) next.delete(trackIndex);
+    else next.add(trackIndex);
+    this.soloTracks = next;
+    this.emit();
+  }
+
+  clearTrackMuteSolo(): void {
+    if (this.mutedTracks.size === 0 && this.soloTracks.size === 0) return;
+    this.mutedTracks = new Set();
+    this.soloTracks = new Set();
+    this.emit();
+  }
+
+  private isTrackAudible(trackIndex: number): boolean {
+    if (this.soloTracks.size > 0) {
+      return this.soloTracks.has(trackIndex);
+    }
+    return !this.mutedTracks.has(trackIndex);
   }
 
   async initWebMidi(): Promise<void> {
@@ -315,6 +692,19 @@ export class WebMidiPlayer {
       midiOutputs: this.midiOutputs,
       selectedMidiOutputId: this.selectedMidiOutputId,
       midiChannelRouting: this.midiChannelRouting,
+      sf2Loaded: this.sf2.isLoaded(),
+      sf2Loading: this.sf2Loading,
+      sf2BankName: this.sf2BankName,
+      sf2FileName: this.sf2FileName,
+      sf2Presets: this.sf2Presets,
+      sf2SelectedPresetId: this.sf2SelectedPresetId,
+      sf2Error: this.sf2Error,
+      sf2Library: this.sf2Library,
+      sf2SelectedSourceId: this.sf2SelectedSourceId,
+      sf2CustomName: this.sf2CustomName,
+      reverbEnabled: this.reverbEnabled,
+      mutedTracks: new Set(this.mutedTracks),
+      soloTracks: new Set(this.soloTracks),
     };
   }
 
@@ -331,7 +721,7 @@ export class WebMidiPlayer {
   setVolume(val: number): void {
     this.volume = Math.max(0, Math.min(1, val));
     if (this.masterGain && this.ctx) {
-      this.masterGain.gain.setTargetAtTime(this.volume * 0.45, this.ctx.currentTime, 0.02);
+      this.masterGain.gain.setTargetAtTime(this.volume * 0.72, this.ctx.currentTime, 0.02);
     }
   }
 
@@ -372,6 +762,34 @@ export class WebMidiPlayer {
     this.nextNoteIdx = 0;
     this.nextPerfIdx = 0;
     this.perfEvents = [];
+    this.mutedTracks = new Set();
+    this.soloTracks = new Set();
+    this.trackProgramMap.clear();
+    this.channelProgramMap.clear();
+
+    if (midi) {
+      for (const pc of midi.performance.programChanges) {
+        if (!this.channelProgramMap.has(pc.channel)) {
+          this.channelProgramMap.set(pc.channel, pc.program);
+        }
+        if (!this.trackProgramMap.has(pc.trackIndex)) {
+          this.trackProgramMap.set(pc.trackIndex, {
+            program: pc.program,
+            isDrum: pc.channel === 9,
+          });
+        }
+      }
+      for (const tr of midi.tracks) {
+        if (!this.trackProgramMap.has(tr.index)) {
+          const isDrumCh = tr.channels.length > 0 && tr.channels.every((c) => c === 9);
+          const inferred = inferGmProgramFromTrackName(tr.name);
+          this.trackProgramMap.set(tr.index, {
+            program: inferred.program,
+            isDrum: isDrumCh || inferred.isDrum,
+          });
+        }
+      }
+    }
 
     if (midi?.performance) {
       const combined: Array<{
@@ -530,6 +948,7 @@ export class WebMidiPlayer {
   }
 
   private stopScheduledNodes(): void {
+    this.sf2.stopAll();
     for (const node of this.activeNodes) {
       try {
         if ('stop' in node && typeof (node as OscillatorNode).stop === 'function') {
@@ -607,6 +1026,8 @@ export class WebMidiPlayer {
       if (note.startSec > horizonSec) break;
       this.nextNoteIdx++;
 
+      if (!this.isTrackAudible(note.trackIndex)) continue;
+
       const deltaMidi = note.startSec - currentSongSec;
       if (deltaMidi < -0.05 * rate) continue;
 
@@ -633,8 +1054,33 @@ export class WebMidiPlayer {
   }
 
   private triggerNote(note: MidiNote, when: number, rate: number): void {
-    if (!this.ctx || !this.masterGain) return;
-    const velGain = Math.max(0.08, (note.velocity / 127) * 0.28);
+    const dest = this.synthBus || this.masterGain;
+    if (!this.ctx || !dest) return;
+
+    // Use loaded SoundFont (.sf2) when available!
+    if (this.sf2.isLoaded()) {
+      const dur = Math.min(10.0, Math.max(0.05, note.durationSec / rate));
+      const trackProg = this.trackProgramMap.get(note.trackIndex);
+      const isDrum = note.channel === 9 || Boolean(trackProg?.isDrum);
+      const program =
+        trackProg?.program ?? this.channelProgramMap.get(note.channel) ?? 0;
+
+      this.sf2.triggerNote(
+        this.ctx,
+        dest,
+        note.pitch,
+        note.velocity,
+        when,
+        dur,
+        note.channel,
+        program,
+        isDrum,
+        this.sf2SelectedPresetId
+      );
+      return;
+    }
+
+    const velGain = Math.max(0.08, (note.velocity / 127) * 0.24);
 
     // Channel 9 (MIDI Ch 10) percussion synthesis
     if (note.channel === 9) {
@@ -669,7 +1115,7 @@ export class WebMidiPlayer {
     osc.connect(filter);
     subOsc.connect(filter);
     filter.connect(env);
-    env.connect(this.masterGain);
+    env.connect(dest);
 
     osc.start(when);
     subOsc.start(when);
@@ -691,7 +1137,8 @@ export class WebMidiPlayer {
   }
 
   private triggerDrum(pitch: number, when: number, velGain: number): void {
-    if (!this.ctx || !this.masterGain) return;
+    const dest = this.synthBus || this.masterGain;
+    if (!this.ctx || !dest) return;
     if (pitch === 35 || pitch === 36) {
       // Kick
       const osc = this.ctx.createOscillator();
@@ -702,7 +1149,7 @@ export class WebMidiPlayer {
       env.gain.setValueAtTime(velGain * 1.4, when);
       env.gain.exponentialRampToValueAtTime(0.0001, when + 0.16);
       osc.connect(env);
-      env.connect(this.masterGain);
+      env.connect(dest);
       osc.start(when);
       osc.stop(when + 0.18);
       this.activeNodes.add(osc);
@@ -729,7 +1176,7 @@ export class WebMidiPlayer {
 
       noise.connect(filter);
       filter.connect(env);
-      env.connect(this.masterGain);
+      env.connect(dest);
       noise.start(when);
       noise.stop(when + decay + 0.01);
       this.activeNodes.add(noise);

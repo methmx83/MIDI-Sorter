@@ -1,25 +1,30 @@
+import { DEFAULT_ARTICULATION_PRESETS } from './metadataPresets';
+
 export interface LibraryAbbreviation {
   key: string;
   meaning: string;
 }
 
 const STORAGE_KEY = 'midi_sorter_abbr_profile_v1';
+const MIGRATED_V2_KEY = 'midi_sorter_abbr_profile_v2_migrated';
+
+const LIBRARY_BASE_ABBREVIATIONS: LibraryAbbreviation[] = [
+  { key: 'CS', meaning: 'Cinematic Studio' },
+  { key: 'CSS', meaning: 'Cinematic Studio Strings' },
+  { key: 'Ark', meaning: 'Metropolis Ark' },
+  { key: 'BL', meaning: 'Berlin Series / Benutzerdefinierte Library' },
+  { key: 'D2', meaning: 'Damage 2' },
+  { key: 'Vio', meaning: 'Violin / Streicher' },
+  { key: 'Trump', meaning: 'Trumpet / Brass' },
+  { key: 'Arp', meaning: 'Arpeggio' },
+];
 
 export const DEFAULT_ABBREVIATIONS: LibraryAbbreviation[] = [
-  { key: 'CS', meaning: 'Cinematic Studio' },
-  { key: 'Ark', meaning: 'Metropolis Ark' },
-  { key: 'BL', meaning: 'Benutzerdefinierte Library / Abkürzung' },
-  { key: 'Spic', meaning: 'Spiccato' },
-  { key: 'Stac', meaning: 'Staccato' },
-  { key: 'Leg', meaning: 'Legato' },
-  { key: 'Marc', meaning: 'Marcato' },
-  { key: 'Sus', meaning: 'Sustain' },
-  { key: 'Uni', meaning: 'Unisono' },
-  { key: 'Flag', meaning: 'Flageolett / Harmonics' },
-  { key: 'Vio', meaning: 'Violin / Streicher' },
-  { key: 'Ens', meaning: 'Ensemble' },
-  { key: 'Trump', meaning: 'Trompete / Brass' },
-  { key: 'Arp', meaning: 'Arpeggio' },
+  ...LIBRARY_BASE_ABBREVIATIONS,
+  ...DEFAULT_ARTICULATION_PRESETS.filter((a) => a.abbr.trim().length > 0).map((a) => ({
+    key: a.abbr,
+    meaning: a.name,
+  })),
 ];
 
 export function loadAbbreviationProfile(): LibraryAbbreviation[] {
@@ -35,7 +40,23 @@ export function loadAbbreviationProfile(): LibraryAbbreviation[] {
         typeof item.meaning === 'string' &&
         item.key.trim().length > 0
     );
-    return valid.length > 0 ? valid : DEFAULT_ABBREVIATIONS.map((x) => ({ ...x }));
+    if (valid.length === 0) return DEFAULT_ABBREVIATIONS.map((x) => ({ ...x }));
+
+    // One-time non-destructive merge of new articulation abbreviations from Presets.md
+    if (!window.localStorage.getItem(MIGRATED_V2_KEY)) {
+      const existingKeys = new Set(valid.map((v) => v.key.trim().toLowerCase()));
+      const merged = [...valid];
+      for (const def of DEFAULT_ABBREVIATIONS) {
+        if (!existingKeys.has(def.key.toLowerCase())) {
+          merged.push({ ...def });
+        }
+      }
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+      window.localStorage.setItem(MIGRATED_V2_KEY, '1');
+      return merged;
+    }
+
+    return valid;
   } catch {
     return DEFAULT_ABBREVIATIONS.map((x) => ({ ...x }));
   }
@@ -44,6 +65,7 @@ export function loadAbbreviationProfile(): LibraryAbbreviation[] {
 export function saveAbbreviationProfile(items: LibraryAbbreviation[]): void {
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+    window.localStorage.setItem(MIGRATED_V2_KEY, '1');
   } catch {
     // Ignore storage quota / privacy mode errors
   }

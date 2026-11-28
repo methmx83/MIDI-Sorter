@@ -5,13 +5,16 @@ import {
   ArrowUp,
   Check,
   Copy,
+  FileCheck2,
   FileText,
   Pencil,
   Scissors,
+  Star,
   Trash2,
   XCircle,
 } from 'lucide-react';
 import type { MidiFileEntry, TriageStatus } from '../types/midi';
+import { ORIGIN_LABELS } from '../utils/midiClassifier';
 import type { DuplicateMatchInfo } from '../utils/midiDuplicates';
 import { formatDuration } from '../utils/midiParser';
 
@@ -20,6 +23,7 @@ export type SortMode =
   | 'name_desc'
   | 'key_asc'
   | 'key_desc'
+  | 'rating_desc'
   | 'notes_asc'
   | 'notes_desc'
   | 'duration_asc'
@@ -187,6 +191,42 @@ export const FileListPane: React.FC<FileListPaneProps> = ({
 
                   {/* Status icons & quick hover actions anchored to trailing edge of Column 1 */}
                   <div className="ml-auto flex items-center gap-1.5 shrink-0 pl-1">
+                    {item.datasetMeta && item.datasetMeta.origin !== 'unbekannt' && (
+                      <span
+                        className={`px-1 py-0 rounded text-[9.5px] font-semibold border leading-tight ${
+                          item.datasetMeta.origin === 'eigenkomposition'
+                            ? 'bg-emerald-950/60 border-emerald-700/60 text-emerald-300'
+                            : 'bg-violet-950/50 border-violet-700/50 text-violet-300'
+                        }`}
+                        title={`Herkunft: ${ORIGIN_LABELS[item.datasetMeta.origin]}`}
+                      >
+                        {item.datasetMeta.origin === 'eigenkomposition' ? 'E' : 'L'}
+                      </span>
+                    )}
+                    {item.datasetMeta?.rating !== null && item.datasetMeta?.rating !== undefined && (
+                      <span
+                        className="inline-flex items-center gap-0.5 text-[10px] font-mono tabular-nums text-amber-300"
+                        title={`Persönliche Bewertung: ${item.datasetMeta.rating}/10`}
+                      >
+                        <Star className="w-2.5 h-2.5 fill-amber-400/80 text-amber-400" />
+                        {item.datasetMeta.rating}
+                      </span>
+                    )}
+                    {item.datasetMeta?.sidecarLoaded && (
+                      <span
+                        title={
+                          item.datasetMeta.sidecarDirty
+                            ? '.txt-Metadaten vorhanden (ungespeicherte Änderungen)'
+                            : '.txt-Metadaten vorhanden & gespeichert'
+                        }
+                      >
+                        <FileCheck2
+                          className={`w-3 h-3 ${
+                            item.datasetMeta.sidecarDirty ? 'text-amber-300' : 'text-emerald-400'
+                          }`}
+                        />
+                      </span>
+                    )}
                     {dup && (() => {
                       const badgeCls =
                         dup.kind === 'byte_exact'

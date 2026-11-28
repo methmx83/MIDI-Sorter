@@ -7,8 +7,11 @@ import {
   Download,
   FileText,
   Plus,
+  RefreshCw,
   RotateCcw,
   Save,
+  Search,
+  Sliders,
   Trash2,
   X,
 } from 'lucide-react';
@@ -17,8 +20,14 @@ import {
   DEFAULT_ABBREVIATIONS,
   type LibraryAbbreviation,
 } from '../utils/abbreviationProfile';
+import {
+  PRESETS_MD_PUBLIC_PATH,
+  type MetadataPresetProfile,
+  type PresetCategoryKey,
+} from '../utils/metadataPresets';
 import { downloadTextFile } from '../utils/fileSystem';
 import type { DuplicateMatchInfo } from '../utils/midiDuplicates';
+import { serializeMetadataSidecarTxt } from '../utils/metadataSidecar';
 import {
   buildDatasetJsonlRecord,
   buildTrainingTxtDraft,
@@ -27,12 +36,17 @@ import {
 
 interface BatchTrainingExportModalProps {
   isOpen: boolean;
-  initialTab?: 'export' | 'abbreviations';
+  initialTab?: 'export' | 'presets' | 'abbreviations';
   entries: MidiFileEntry[];
   duplicateMap: Map<string, DuplicateMatchInfo>;
   canWriteToDisk: boolean;
   abbreviations: LibraryAbbreviation[];
   onChangeAbbreviations: (next: LibraryAbbreviation[]) => void;
+  metadataPresets: MetadataPresetProfile;
+  presetsLoadedFromFile: boolean;
+  onChangeMetadataPresets: (next: MetadataPresetProfile) => void;
+  onResetPresetCategory: (category: PresetCategoryKey) => void;
+  onReloadPresetsFromFile: () => Promise<boolean>;
   onSaveTextToDisk: (entry: MidiFileEntry, filename: string, content: string) => Promise<string>;
   onClose: () => void;
 }
@@ -45,12 +59,25 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
   canWriteToDisk,
   abbreviations,
   onChangeAbbreviations,
+  metadataPresets,
+  presetsLoadedFromFile,
+  onChangeMetadataPresets,
+  onResetPresetCategory,
+  onReloadPresetsFromFile,
   onSaveTextToDisk,
   onClose,
 }) => {
-  const [activeTab, setActiveTab] = useState<'export' | 'abbreviations'>(initialTab);
+  const [activeTab, setActiveTab] = useState<'export' | 'presets' | 'abbreviations'>(initialTab);
   const [scope, setScope] = useState<'keep' | 'valid'>('keep');
   const [dedupeMode, setDedupeMode] = useState<'none' | 'exact' | 'all'>('exact');
+
+  const [presetCategory, setPresetCategory] = useState<PresetCategoryKey>('genres');
+  const [presetFilter, setPresetFilter] = useState<string>('');
+  const [newPresetValue, setNewPresetValue] = useState<string>('');
+  const [newArtAbbr, setNewArtAbbr] = useState<string>('');
+  const [presetError, setPresetError] = useState<string | null>(null);
+  const [presetReloadStatus, setPresetReloadStatus] = useState<string | null>(null);
+  const [reloadingPresets, setReloadingPresets] = useState<boolean>(false);
 
   const [newKey, setNewKey] = useState<string>('');
   const [newMeaning, setNewMeaning] = useState<string>('');
@@ -138,7 +165,9 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
       let saved = 0;
       for (const item of targetEntries) {
         const draft = buildTrainingTxtDraft(item, abbreviations);
-        const txt = serializeTrainingTxt(draft);
+        const txt = item.datasetMeta
+          ? serializeMetadataSidecarTxt(item, item.datasetMeta)
+          : serializeTrainingTxt(draft);
         const baseName = item.name.replace(/\.(mid|midi)$/i, '');
         await onSaveTextToDisk(item, `${baseName}.txt`, txt);
         saved++;
@@ -160,7 +189,9 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
     if (targetEntries.length === 0) return;
     const lines = targetEntries.map((item) => {
       const draft = buildTrainingTxtDraft(item, abbreviations);
-      const txt = serializeTrainingTxt(draft);
+      const txt = item.datasetMeta
+        ? serializeMetadataSidecarTxt(item, item.datasetMeta)
+        : serializeTrainingTxt(draft);
       return buildDatasetJsonlRecord(item, draft, txt);
     });
     downloadTextFile('midi_training_dataset.jsonl', lines.join('\n') + '\n');
@@ -174,7 +205,9 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
     if (targetEntries.length === 0) return;
     const blocks = targetEntries.map((item) => {
       const draft = buildTrainingTxtDraft(item, abbreviations);
-      const txt = serializeTrainingTxt(draft);
+      const txt = item.datasetMeta
+        ? serializeMetadataSidecarTxt(item, item.datasetMeta)
+        : serializeTrainingTxt(draft);
       return `# === ${item.relativePath} ===\n${txt}`;
     });
     downloadTextFile('alle_training_beschreibungen.txt', blocks.join('\n'));
@@ -202,6 +235,127 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
     setAbbrError(null);
   };
 
+  const handleAddPresetItem = (e: React.FormEvent) => {
+    e.preventDefault();
+    const val = newPresetValue.trim();
+    if (!val) {
+      setPresetError('Bitte einen Eintrag eingeben.');
+      return;
+    }
+    if (presetCategory === 'articulations') {
+      const abbr = newArtAbbr.trim();
+      if (
+        metadataPresets.articulations.some(
+          (a) => a.name.toLowerCase() === val.toLowerCase()
+        )
+      ) {
+        setPresetError(`Die Artikulation „${val}“ existiert bereits.`);
+        return;
+      }
+      onChangeMetadataPresets({
+        ...metadataPresets,
+        articulations: [...metadataPresets.articulations, { abbr, name: val }],
+      });
+      setNewPresetValue('');
+      setNewArtAbbr('');
+      setPresetError(null);
+      return;
+    }
+
+    const existing = metadataPresets[presetCategory];
+    if (existing.some((item) => item.toLowerCase() === val.toLowerCase())) {
+      setPresetError(`„${val}“ existiert bereits in dieser Liste.`);
+      return;
+    }
+    onChangeMetadataPresets({
+      ...metadataPresets,
+      [presetCategory]: [...existing, val],
+    });
+    setNewPresetValue('');
+    setPresetError(null);
+  };
+
+  const handleResetPresetCategory = () => {
+    onResetPresetCategory(presetCategory);
+    setPresetError(null);
+  };
+
+  const handleReloadPresetsClick = async () => {
+    setReloadingPresets(true);
+    setPresetReloadStatus(null);
+    try {
+      const ok = await onReloadPresetsFromFile();
+      setPresetReloadStatus(
+        ok
+          ? 'Presets.md erfolgreich neu eingelesen!'
+          : 'Presets.md nicht erreichbar – Standardwerte aktiv.'
+      );
+      window.setTimeout(() => setPresetReloadStatus(null), 2600);
+    } finally {
+      setReloadingPresets(false);
+    }
+  };
+
+  const presetCategoryMeta: Array<{
+    key: PresetCategoryKey;
+    label: string;
+    count: number;
+    placeholder: string;
+  }> = [
+    {
+      key: 'genres',
+      label: 'Genres',
+      count: metadataPresets.genres.length,
+      placeholder: 'Neues Genre (z. B. Cinematic Rock)',
+    },
+    {
+      key: 'subgenres',
+      label: 'Subgenres',
+      count: metadataPresets.subgenres.length,
+      placeholder: 'Neues Subgenre (z. B. Dark Orchestral)',
+    },
+    {
+      key: 'moods',
+      label: 'Moods',
+      count: metadataPresets.moods.length,
+      placeholder: 'Neuer Mood (z. B. Tense, Uplifting)',
+    },
+    {
+      key: 'instruments',
+      label: 'Instrumente',
+      count: metadataPresets.instruments.length,
+      placeholder: 'Neues Instrument (z. B. Harp, Ethnic Flute)',
+    },
+    {
+      key: 'instrumentFamilies',
+      label: 'Familien',
+      count: metadataPresets.instrumentFamilies.length,
+      placeholder: 'Neue Familie (z. B. Ethnic / World)',
+    },
+    {
+      key: 'roles',
+      label: 'Rollen',
+      count: metadataPresets.roles.length,
+      placeholder: 'Neue Rolle (z. B. Build-Up, Counter-Rhythm)',
+    },
+    {
+      key: 'articulations',
+      label: 'Artikulationen',
+      count: metadataPresets.articulations.length,
+      placeholder: 'Bezeichnung (z. B. Col legno, One-Shots)',
+    },
+    {
+      key: 'workStatuses',
+      label: 'Werkstatus',
+      count: metadataPresets.workStatuses.length,
+      placeholder: 'Neuer Status (z. B. gemastert, archiv)',
+    },
+  ];
+
+  const activePresetMeta =
+    presetCategoryMeta.find((c) => c.key === presetCategory) || presetCategoryMeta[0];
+  const presetFilterNorm = presetFilter.trim().toLowerCase();
+
   return (
     <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
       <div className="w-full max-w-3xl max-h-[88vh] flex flex-col rounded-lg bg-[#1c2026] border border-[#313844] shadow-2xl overflow-hidden">
@@ -211,10 +365,10 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
             <Database className="w-4 h-4 text-[#5eb1e6] shrink-0" />
             <div className="min-w-0">
               <h2 className="text-sm font-semibold text-white truncate">
-                Trainings-Dataset Export &amp; Kürzel-Profil
+                Trainings-Dataset Export, Presets &amp; Kürzel-Profil
               </h2>
               <p className="text-xs text-[#8892a0] truncate">
-                Batch-Export für dein eigenes MIDI-Modell inklusive persönlicher Library-Abkürzungen.
+                Batch-Export, deine persönlichen Dropdown-Presets und Library-Abkürzungen.
               </p>
             </div>
           </div>
@@ -229,11 +383,11 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
         </div>
 
         {/* Tab Bar */}
-        <div className="px-5 pt-2.5 bg-[#181c21] border-b border-[#2b313a] flex items-center gap-2 shrink-0">
+        <div className="px-5 pt-2.5 bg-[#181c21] border-b border-[#2b313a] flex items-center gap-2 shrink-0 overflow-x-auto">
           <button
             type="button"
             onClick={() => setActiveTab('export')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-t text-xs font-medium border-b-2 transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-t text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
               activeTab === 'export'
                 ? 'border-[#5eb1e6] text-white bg-[#1c2026]'
                 : 'border-transparent text-[#8d96a4] hover:text-[#dce2ea]'
@@ -244,8 +398,20 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
           </button>
           <button
             type="button"
+            onClick={() => setActiveTab('presets')}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-t text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
+              activeTab === 'presets'
+                ? 'border-[#5eb1e6] text-white bg-[#1c2026]'
+                : 'border-transparent text-[#8d96a4] hover:text-[#dce2ea]'
+            }`}
+          >
+            <Sliders className="w-3.5 h-3.5" />
+            Metadaten-Presets
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab('abbreviations')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-t text-xs font-medium border-b-2 transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-t text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
               activeTab === 'abbreviations'
                 ? 'border-[#5eb1e6] text-white bg-[#1c2026]'
                 : 'border-transparent text-[#8d96a4] hover:text-[#dce2ea]'
@@ -414,6 +580,217 @@ export const BatchTrainingExportModal: React.FC<BatchTrainingExportModalProps> =
             {exportError && (
               <div className="p-3 rounded bg-rose-950/40 border border-rose-700/50 text-rose-200">
                 {exportError}
+              </div>
+            )}
+          </div>
+        ) : activeTab === 'presets' ? (
+          <div className="p-5 overflow-y-auto space-y-4 text-xs flex-1 min-h-0">
+            <div className="p-3 rounded bg-[#141920] border border-[#2a3442] flex flex-wrap items-center justify-between gap-2.5">
+              <div className="space-y-0.5 min-w-0">
+                <div className="text-[#dce7f3] font-medium flex items-center gap-1.5">
+                  <span
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      presetsLoadedFromFile ? 'bg-emerald-400' : 'bg-amber-400'
+                    }`}
+                  />
+                  <span>
+                    {presetsLoadedFromFile
+                      ? 'Live verbunden mit public/' + PRESETS_MD_PUBLIC_PATH
+                      : 'Standard-Presets aktiv (Presets.md nicht geladen)'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#8894a3]">
+                  Änderungen in <code className="text-[#9dd0f5]">Presets.md</code> werden beim
+                  Neuladen automatisch übernommen; Ergänzungen hier bleiben zusätzlich im Browser
+                  gespeichert.
+                </p>
+                {presetReloadStatus && (
+                  <p className="text-[11px] text-emerald-300 font-medium">{presetReloadStatus}</p>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  disabled={reloadingPresets}
+                  onClick={() => void handleReloadPresetsClick()}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-[11px] font-medium bg-[#223447] hover:bg-[#2b425a] border border-[#4ea1d3]/60 text-[#dceeff] disabled:opacity-50 transition-colors"
+                  title="Presets.md direkt neu einlesen ohne Seite neu zu laden"
+                >
+                  <RefreshCw className={`w-3 h-3 ${reloadingPresets ? 'animate-spin' : ''}`} />
+                  Presets.md neu laden
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetPresetCategory}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded text-[11px] bg-[#22272f] hover:bg-[#2b313c] border border-[#343c48] text-[#9aa3b0] hover:text-white transition-colors"
+                  title={`Lokale Änderungen für „${activePresetMeta.label}“ verwerfen und 1:1 aus Presets.md übernehmen`}
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  Zurücksetzen
+                </button>
+              </div>
+            </div>
+
+            {/* Category selector pills */}
+            <div className="flex flex-wrap gap-1.5">
+              {presetCategoryMeta.map((cat) => (
+                <button
+                  key={cat.key}
+                  type="button"
+                  onClick={() => {
+                    setPresetCategory(cat.key);
+                    setPresetFilter('');
+                    setPresetError(null);
+                  }}
+                  className={`px-2.5 py-1.5 rounded text-[11.5px] font-medium border transition-colors ${
+                    presetCategory === cat.key
+                      ? 'bg-[#21364a] border-[#5eb1e6]/70 text-white'
+                      : 'bg-[#15191f] border-[#2b333f] text-[#94a0b0] hover:text-white'
+                  }`}
+                >
+                  {cat.label}{' '}
+                  <span className="font-mono text-[10.5px] text-[#7cc4f0] ml-0.5">
+                    ({cat.count})
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {/* Add form */}
+            <form onSubmit={handleAddPresetItem} className="flex flex-wrap items-center gap-2">
+              {presetCategory === 'articulations' && (
+                <input
+                  type="text"
+                  value={newArtAbbr}
+                  onChange={(e) => {
+                    setNewArtAbbr(e.target.value);
+                    if (presetError) setPresetError(null);
+                  }}
+                  placeholder="Kürzel (optional, z. B. Col)"
+                  className="w-40 px-2.5 py-1.5 rounded bg-[#13171b] border border-[#2f3742] text-[#e6ecf4] font-mono focus:outline-none focus:border-[#4ea1d3]"
+                />
+              )}
+              <input
+                type="text"
+                value={newPresetValue}
+                onChange={(e) => {
+                  setNewPresetValue(e.target.value);
+                  if (presetError) setPresetError(null);
+                }}
+                placeholder={activePresetMeta.placeholder}
+                className="flex-1 min-w-[200px] px-2.5 py-1.5 rounded bg-[#13171b] border border-[#2f3742] text-[#e6ecf4] focus:outline-none focus:border-[#4ea1d3]"
+              />
+              <button
+                type="submit"
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded font-medium bg-[#3675a3] hover:bg-[#4187ba] text-white transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Hinzufügen
+              </button>
+            </form>
+            {presetError && <p className="text-rose-400">{presetError}</p>}
+
+            {/* Quick filter for larger lists */}
+            {activePresetMeta.count > 12 && (
+              <div className="relative flex items-center">
+                <Search className="w-3.5 h-3.5 text-[#6f7b8b] absolute left-2.5 pointer-events-none" />
+                <input
+                  type="text"
+                  value={presetFilter}
+                  onChange={(e) => setPresetFilter(e.target.value)}
+                  placeholder={`${activePresetMeta.label} durchsuchen…`}
+                  className="w-full pl-8 pr-2.5 py-1.5 rounded bg-[#13171b] border border-[#2b333f] text-[#e6ecf4] placeholder:text-[#667282] focus:outline-none focus:border-[#4ea1d3]"
+                />
+              </div>
+            )}
+
+            {/* List / Chips */}
+            {presetCategory === 'articulations' ? (
+              <div className="border border-[#2b323d] rounded divide-y divide-[#252b34] bg-[#14181d]">
+                {metadataPresets.articulations
+                  .map((item, idx) => ({ item, idx }))
+                  .filter(
+                    ({ item }) =>
+                      !presetFilterNorm ||
+                      item.name.toLowerCase().includes(presetFilterNorm) ||
+                      item.abbr.toLowerCase().includes(presetFilterNorm)
+                  )
+                  .map(({ item, idx }) => (
+                    <div
+                      key={`${item.name}-${idx}`}
+                      className="flex items-center gap-2 px-3 py-2"
+                    >
+                      <input
+                        type="text"
+                        value={item.abbr}
+                        onChange={(e) => {
+                          const next = metadataPresets.articulations.map((a, i) =>
+                            i === idx ? { ...a, abbr: e.target.value } : a
+                          );
+                          onChangeMetadataPresets({ ...metadataPresets, articulations: next });
+                        }}
+                        placeholder="Kürzel"
+                        className="w-24 px-2 py-1 rounded bg-[#1c2128] border border-[#2d3540] font-mono text-[#a5d8ff] focus:outline-none focus:border-[#4ea1d3]"
+                      />
+                      <span className="text-[#5e6875]">|</span>
+                      <input
+                        type="text"
+                        value={item.name}
+                        onChange={(e) => {
+                          const next = metadataPresets.articulations.map((a, i) =>
+                            i === idx ? { ...a, name: e.target.value } : a
+                          );
+                          onChangeMetadataPresets({ ...metadataPresets, articulations: next });
+                        }}
+                        className="flex-1 px-2 py-1 rounded bg-[#1c2128] border border-[#2d3540] text-[#dce4ee] focus:outline-none focus:border-[#4ea1d3]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onChangeMetadataPresets({
+                            ...metadataPresets,
+                            articulations: metadataPresets.articulations.filter(
+                              (_, i) => i !== idx
+                            ),
+                          })
+                        }
+                        className="p-1 rounded text-[#7f8896] hover:text-rose-400 hover:bg-[#232830] transition-colors"
+                        title="Artikulation entfernen"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <div className="p-3 rounded border border-[#2b323d] bg-[#14181d] flex flex-wrap gap-1.5">
+                {metadataPresets[presetCategory]
+                  .filter(
+                    (val) => !presetFilterNorm || val.toLowerCase().includes(presetFilterNorm)
+                  )
+                  .map((val) => (
+                    <span
+                      key={val}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#1d2530] border border-[#2f3b4b] text-[#dbe6f2] text-[11.5px]"
+                    >
+                      <span>{val}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onChangeMetadataPresets({
+                            ...metadataPresets,
+                            [presetCategory]: metadataPresets[presetCategory].filter(
+                              (item) => item !== val
+                            ),
+                          })
+                        }
+                        className="text-[#7c899b] hover:text-rose-400 transition-colors"
+                        title={`„${val}“ entfernen`}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
               </div>
             )}
           </div>

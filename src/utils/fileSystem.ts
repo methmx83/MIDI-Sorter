@@ -12,6 +12,15 @@ export function isMidiFilename(name: string): boolean {
   return lower.endsWith('.mid') || lower.endsWith('.midi');
 }
 
+export function isSidecarTxtFilename(name: string): boolean {
+  return name.toLowerCase().endsWith('.txt');
+}
+
+function getFileStemLower(name: string): string {
+  const dotIdx = name.lastIndexOf('.');
+  return (dotIdx > 0 ? name.slice(0, dotIdx) : name).toLowerCase();
+}
+
 export function canUseNativeDirectoryPicker(): boolean {
   try {
     return (
@@ -32,25 +41,36 @@ async function scanDirectoryHandle(
   const iter = (
     dirHandle as unknown as { values: () => AsyncIterable<FileSystemHandle> }
   ).values();
+  const dirMidiEntries: MidiFileEntry[] = [];
+  const dirTxtMap = new Map<string, { handle: FileSystemFileHandle; relativePath: string }>();
+  const subDirs: Array<{ handle: FileSystemDirectoryHandle; subPrefix: string }> = [];
+
   for await (const handle of iter) {
     if (handle.kind === 'file') {
-      if (!isMidiFilename(handle.name)) continue;
-      const fileHandle = handle as FileSystemFileHandle;
-      const file = await fileHandle.getFile();
-      const relativePath = prefix ? `${prefix}/${handle.name}` : handle.name;
-      out.push({
-        id: `${relativePath}::${file.size}::${file.lastModified}`,
-        name: handle.name,
-        relativePath,
-        folderPath: prefix,
-        sizeBytes: file.size,
-        lastModified: file.lastModified,
-        file,
-        fileHandle,
-        parentDirHandle: dirHandle,
-        parsed: null,
-        triage: 'pending',
-      });
+      if (isMidiFilename(handle.name)) {
+        const fileHandle = handle as FileSystemFileHandle;
+        const file = await fileHandle.getFile();
+        const relativePath = prefix ? `${prefix}/${handle.name}` : handle.name;
+        dirMidiEntries.push({
+          id: `${relativePath}::${file.size}::${file.lastModified}`,
+          name: handle.name,
+          relativePath,
+          folderPath: prefix,
+          sizeBytes: file.size,
+          lastModified: file.lastModified,
+          file,
+          fileHandle,
+          parentDirHandle: dirHandle,
+          parsed: null,
+          triage: 'pending',
+        });
+      } else if (isSidecarTxtFilename(handle.name)) {
+        const relativePath = prefix ? `${prefix}/${handle.name}` : handle.name;
+        dirTxtMap.set(getFileStemLower(handle.name), {
+          handle: handle as FileSystemFileHandle,
+          relativePath,
+        });
+      }
     } else if (handle.kind === 'directory') {
       // Skip hidden, trash, or automatic backup folders
       if (
@@ -61,8 +81,21 @@ async function scanDirectoryHandle(
         continue;
       }
       const subPrefix = prefix ? `${prefix}/${handle.name}` : handle.name;
-      await scanDirectoryHandle(handle as FileSystemDirectoryHandle, subPrefix, out);
+      subDirs.push({ handle: handle as FileSystemDirectoryHandle, subPrefix });
     }
+  }
+
+  for (const entry of dirMidiEntries) {
+    const match = dirTxtMap.get(getFileStemLower(entry.name));
+    if (match) {
+      entry.sidecarHandle = match.handle;
+      entry.sidecarRelativePath = match.relativePath;
+    }
+    out.push(entry);
+  }
+
+  for (const sub of subDirs) {
+    await scanDirectoryHandle(sub.handle, sub.subPrefix, out);
   }
 }
 
@@ -99,22 +132,40 @@ export async function pickFolderNative(): Promise<LoadedFolderResult> {
 }
 
 export function loadFromFileList(fileList: FileList | File[]): LoadedFolderResult {
-  const files = Array.from(fileList).filter((f) => isMidiFilename(f.name));
+  const allFiles = Array.from(fileList);
+  const midiFiles = allFiles.filter((f) => isMidiFilename(f.name));
+  const txtFiles = allFiles.filter((f) => isSidecarTxtFilename(f.name));
   let folderName = 'Ausgewählter Ordner';
 
-  const entries: MidiFileEntry[] = files.map((file) => {
+  const extractRel = (file: File): { relativePath: string; folderPath: string } => {
     const webkitPath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || '';
-    let relativePath = file.name;
-    let folderPath = '';
-
     if (webkitPath) {
       const parts = webkitPath.split('/');
       if (parts.length > 1) {
         folderName = parts[0];
-        relativePath = parts.slice(1).join('/');
-        folderPath = parts.slice(1, -1).join('/');
+        return {
+          relativePath: parts.slice(1).join('/'),
+          folderPath: parts.slice(1, -1).join('/'),
+        };
       }
     }
+    return { relativePath: file.name, folderPath: '' };
+  };
+
+  const txtByFolderStem = new Map<string, { file: File; relativePath: string }>();
+  for (const tf of txtFiles) {
+    const { relativePath, folderPath } = extractRel(tf);
+    txtByFolderStem.set(`${folderPath.toLowerCase()}::${getFileStemLower(tf.name)}`, {
+      file: tf,
+      relativePath,
+    });
+  }
+
+  const entries: MidiFileEntry[] = midiFiles.map((file) => {
+    const { relativePath, folderPath } = extractRel(file);
+    const sidecar = txtByFolderStem.get(
+      `${folderPath.toLowerCase()}::${getFileStemLower(file.name)}`
+    );
 
     return {
       id: `${relativePath}::${file.size}::${file.lastModified}`,
@@ -124,6 +175,8 @@ export function loadFromFileList(fileList: FileList | File[]): LoadedFolderResul
       sizeBytes: file.size,
       lastModified: file.lastModified,
       file,
+      sidecarFile: sidecar?.file,
+      sidecarRelativePath: sidecar?.relativePath,
       parsed: null,
       triage: 'pending',
     };
@@ -142,16 +195,19 @@ export function loadFromFileList(fileList: FileList | File[]): LoadedFolderResul
 async function readEntryFiles(
   entry: FileSystemEntry,
   prefix: string,
-  out: Array<{ file: File; relativePath: string; folderPath: string }>
+  outMidi: Array<{ file: File; relativePath: string; folderPath: string }>,
+  outTxt: Array<{ file: File; relativePath: string; folderPath: string }>
 ): Promise<void> {
   if (entry.isFile) {
     const fileEntry = entry as FileSystemFileEntry;
     const file = await new Promise<File>((resolve, reject) => {
       fileEntry.file(resolve, reject);
     });
+    const relativePath = prefix ? `${prefix}/${file.name}` : file.name;
     if (isMidiFilename(file.name)) {
-      const relativePath = prefix ? `${prefix}/${file.name}` : file.name;
-      out.push({ file, relativePath, folderPath: prefix });
+      outMidi.push({ file, relativePath, folderPath: prefix });
+    } else if (isSidecarTxtFilename(file.name)) {
+      outTxt.push({ file, relativePath, folderPath: prefix });
     }
   } else if (entry.isDirectory) {
     if (entry.name === '_Aussortiert' || entry.name === '_Originale_Backup') return;
@@ -172,14 +228,15 @@ async function readEntryFiles(
     const children = await readAllBatch();
     const nextPrefix = prefix ? `${prefix}/${entry.name}` : entry.name;
     for (const child of children) {
-      await readEntryFiles(child, nextPrefix, out);
+      await readEntryFiles(child, nextPrefix, outMidi, outTxt);
     }
   }
 }
 
 export async function loadFromDataTransfer(dataTransfer: DataTransfer): Promise<LoadedFolderResult> {
   const items = Array.from(dataTransfer.items || []);
-  const collected: Array<{ file: File; relativePath: string; folderPath: string }> = [];
+  const collectedMidi: Array<{ file: File; relativePath: string; folderPath: string }> = [];
+  const collectedTxt: Array<{ file: File; relativePath: string; folderPath: string }> = [];
   let rootFolderName = 'Abgelegte MIDI-Dateien';
 
   const fsEntries = items
@@ -195,33 +252,50 @@ export async function loadFromDataTransfer(dataTransfer: DataTransfer): Promise<
         reader.readEntries(resolve, reject);
       });
       for (const child of children) {
-        await readEntryFiles(child, '', collected);
+        await readEntryFiles(child, '', collectedMidi, collectedTxt);
       }
     } else {
       for (const entry of fsEntries) {
-        await readEntryFiles(entry, '', collected);
+        await readEntryFiles(entry, '', collectedMidi, collectedTxt);
       }
     }
   } else {
     for (const file of Array.from(dataTransfer.files)) {
       if (isMidiFilename(file.name)) {
-        collected.push({ file, relativePath: file.name, folderPath: '' });
+        collectedMidi.push({ file, relativePath: file.name, folderPath: '' });
+      } else if (isSidecarTxtFilename(file.name)) {
+        collectedTxt.push({ file, relativePath: file.name, folderPath: '' });
       }
     }
   }
 
-  const entries: MidiFileEntry[] = collected
-    .map(({ file, relativePath, folderPath }) => ({
-      id: `${relativePath}::${file.size}::${file.lastModified}`,
-      name: file.name,
-      relativePath,
-      folderPath,
-      sizeBytes: file.size,
-      lastModified: file.lastModified,
-      file,
-      parsed: null,
-      triage: 'pending' as const,
-    }))
+  const txtMap = new Map<string, { file: File; relativePath: string }>();
+  for (const tf of collectedTxt) {
+    txtMap.set(`${tf.folderPath.toLowerCase()}::${getFileStemLower(tf.file.name)}`, {
+      file: tf.file,
+      relativePath: tf.relativePath,
+    });
+  }
+
+  const entries: MidiFileEntry[] = collectedMidi
+    .map(({ file, relativePath, folderPath }) => {
+      const sidecar = txtMap.get(
+        `${folderPath.toLowerCase()}::${getFileStemLower(file.name)}`
+      );
+      return {
+        id: `${relativePath}::${file.size}::${file.lastModified}`,
+        name: file.name,
+        relativePath,
+        folderPath,
+        sizeBytes: file.size,
+        lastModified: file.lastModified,
+        file,
+        sidecarFile: sidecar?.file,
+        sidecarRelativePath: sidecar?.relativePath,
+        parsed: null,
+        triage: 'pending' as const,
+      };
+    })
     .sort((a, b) => a.relativePath.localeCompare(b.relativePath, 'de', { sensitivity: 'base' }));
 
   return {
@@ -230,6 +304,21 @@ export async function loadFromDataTransfer(dataTransfer: DataTransfer): Promise<
     canWriteToDisk: false,
     entries,
   };
+}
+
+export async function readSidecarText(entry: MidiFileEntry): Promise<string | null> {
+  try {
+    if (entry.sidecarHandle) {
+      const f = await entry.sidecarHandle.getFile();
+      return await f.text();
+    }
+    if (entry.sidecarFile) {
+      return await entry.sidecarFile.text();
+    }
+  } catch {
+    // Ignore unreadable sidecar
+  }
+  return null;
 }
 
 export async function moveEntryToSortedFolder(
@@ -250,6 +339,21 @@ export async function moveEntryToSortedFolder(
   await writable.write(await sourceFile.arrayBuffer());
   await writable.close();
   await entry.parentDirHandle.removeEntry(entry.name);
+
+  // Also move matching .txt sidecar if present so MIDI and metadata stay paired
+  if (entry.sidecarHandle) {
+    try {
+      const sidecarFile = await entry.sidecarHandle.getFile();
+      const safeSidecarName = safeName.replace(/\.(mid|midi)$/i, '.txt');
+      const sidecarDest = await targetDir.getFileHandle(safeSidecarName, { create: true });
+      const sw = await sidecarDest.createWritable();
+      await sw.write(await sidecarFile.arrayBuffer());
+      await sw.close();
+      await entry.parentDirHandle.removeEntry(entry.sidecarHandle.name);
+    } catch {
+      // Non-fatal if sidecar was already removed
+    }
+  }
 }
 
 export async function deleteEntryFromDisk(entry: MidiFileEntry): Promise<void> {
@@ -426,7 +530,13 @@ export function downloadMidiBuffer(filename: string, buffer: ArrayBuffer): void 
 export async function renameEntryOnDisk(
   entry: MidiFileEntry,
   newFilename: string
-): Promise<{ fileHandle: FileSystemFileHandle; file: File }> {
+): Promise<{
+  fileHandle: FileSystemFileHandle;
+  file: File;
+  sidecarHandle?: FileSystemFileHandle;
+  sidecarFile?: File;
+  sidecarRelativePath?: string;
+}> {
   if (!entry.fileHandle || !entry.parentDirHandle) {
     throw new Error('Kein Schreibzugriff auf die lokale Datei.');
   }
@@ -449,23 +559,73 @@ export async function renameEntryOnDisk(
     move?: (newName: string) => Promise<void>;
   };
 
+  let updatedHandle: FileSystemFileHandle;
+  let updatedFile: File;
+
   if (typeof movableHandle.move === 'function') {
     await movableHandle.move(newFilename);
-    const updatedHandle = await entry.parentDirHandle.getFileHandle(newFilename, { create: false });
-    const file = await updatedHandle.getFile();
-    return { fileHandle: updatedHandle, file };
+    updatedHandle = await entry.parentDirHandle.getFileHandle(newFilename, { create: false });
+    updatedFile = await updatedHandle.getFile();
+  } else {
+    // Fallback for browsers without FileSystemFileHandle.move()
+    const sourceFile = await entry.fileHandle.getFile();
+    const data = await sourceFile.arrayBuffer();
+    const destHandle = await entry.parentDirHandle.getFileHandle(newFilename, { create: true });
+    const writable = await destHandle.createWritable();
+    await writable.write(data);
+    await writable.close();
+    await entry.parentDirHandle.removeEntry(entry.name);
+    updatedHandle = destHandle;
+    updatedFile = await destHandle.getFile();
   }
 
-  // Fallback for browsers without FileSystemFileHandle.move()
-  const sourceFile = await entry.fileHandle.getFile();
-  const data = await sourceFile.arrayBuffer();
-  const destHandle = await entry.parentDirHandle.getFileHandle(newFilename, { create: true });
-  const writable = await destHandle.createWritable();
-  await writable.write(data);
-  await writable.close();
-  await entry.parentDirHandle.removeEntry(entry.name);
-  const file = await destHandle.getFile();
-  return { fileHandle: destHandle, file };
+  // Rename paired .txt sidecar alongside the MIDI file if it exists
+  let nextSidecarHandle: FileSystemFileHandle | undefined;
+  let nextSidecarFile: File | undefined;
+  let nextSidecarRel: string | undefined;
+
+  if (entry.sidecarHandle) {
+    const newSidecarName = newFilename.replace(/\.(mid|midi)$/i, '.txt');
+    try {
+      const movableSidecar = entry.sidecarHandle as FileSystemFileHandle & {
+        move?: (newName: string) => Promise<void>;
+      };
+      if (typeof movableSidecar.move === 'function') {
+        await movableSidecar.move(newSidecarName);
+        nextSidecarHandle = await entry.parentDirHandle.getFileHandle(newSidecarName, {
+          create: false,
+        });
+        nextSidecarFile = await nextSidecarHandle.getFile();
+      } else {
+        const oldTxt = await entry.sidecarHandle.getFile();
+        const txtDest = await entry.parentDirHandle.getFileHandle(newSidecarName, {
+          create: true,
+        });
+        const tw = await txtDest.createWritable();
+        await tw.write(await oldTxt.arrayBuffer());
+        await tw.close();
+        await entry.parentDirHandle.removeEntry(entry.sidecarHandle.name);
+        nextSidecarHandle = txtDest;
+        nextSidecarFile = await txtDest.getFile();
+      }
+      nextSidecarRel = entry.folderPath
+        ? `${entry.folderPath}/${newSidecarName}`
+        : newSidecarName;
+    } catch {
+      // Keep existing handle reference if sidecar move fails
+      nextSidecarHandle = entry.sidecarHandle;
+      nextSidecarFile = entry.sidecarFile;
+      nextSidecarRel = entry.sidecarRelativePath;
+    }
+  }
+
+  return {
+    fileHandle: updatedHandle,
+    file: updatedFile,
+    sidecarHandle: nextSidecarHandle,
+    sidecarFile: nextSidecarFile,
+    sidecarRelativePath: nextSidecarRel,
+  };
 }
 
 export async function saveTextFileOnDisk(
@@ -481,6 +641,28 @@ export async function saveTextFileOnDisk(
   await writable.write(new Blob([content], { type: 'text/plain;charset=utf-8' }));
   await writable.close();
   return filename;
+}
+
+export async function saveSidecarTxtOnDisk(
+  entry: MidiFileEntry,
+  content: string
+): Promise<{
+  filename: string;
+  relativePath: string;
+  sidecarHandle: FileSystemFileHandle;
+  sidecarFile: File;
+}> {
+  if (!entry.parentDirHandle) {
+    throw new Error('Kein Schreibzugriff auf den Zielordner.');
+  }
+  const filename = entry.name.replace(/\.(mid|midi)$/i, '.txt');
+  const destHandle = await entry.parentDirHandle.getFileHandle(filename, { create: true });
+  const writable = await destHandle.createWritable();
+  await writable.write(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+  await writable.close();
+  const sidecarFile = await destHandle.getFile();
+  const relativePath = entry.folderPath ? `${entry.folderPath}/${filename}` : filename;
+  return { filename, relativePath, sidecarHandle: destHandle, sidecarFile };
 }
 
 export function downloadTextFile(filename: string, content: string): void {
